@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# infisical shim for Marshall's container (CUP-4776, plan Phase 1.3).
+#
+# pp-stack skills wrap every command as:
+#   infisical run --projectId=… --env=… --silent -- <cmd…>
+# In this container there is no Infisical login and no real tokens: the OneCLI
+# gateway injects credentials at the HTTP proxy, and it REPLACES placeholder
+# values in transit. So the wrapper is a passthrough — skip the flags, export
+# placeholders for tools that require the env locally, exec the command.
+#
+# Also supported: `infisical secrets get <KEY> … --plain` (the /story skill
+# uses it to feed a raw curl) — prints the placeholder, which the proxy swaps.
+set -euo pipefail
+
+placeholder="onecli-gateway-placeholder"
+
+case "${1:-}" in
+  run)
+    shift
+    while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
+    [ "${1:-}" = "--" ] && shift
+    if [ $# -eq 0 ]; then
+      echo "infisical shim: no command after --" >&2
+      exit 64
+    fi
+    export CLICKUP_API_TOKEN="${CLICKUP_API_TOKEN:-$placeholder}"
+    export CLICKUP_TEAM_ID="${CLICKUP_TEAM_ID:-2385794}"
+    export GITHUB_TOKEN="${GITHUB_TOKEN:-$placeholder}"
+    exec "$@"
+    ;;
+  secrets)
+    # Only the read shape used by pp-stack skills: secrets get <KEY> … --plain
+    if [ "${2:-}" = "get" ]; then
+      echo "$placeholder"
+      exit 0
+    fi
+    echo "infisical shim: 'secrets ${2:-}' is not supported in the container — secrets live in the OneCLI gateway, ask the operator." >&2
+    exit 64
+    ;;
+  *)
+    echo "infisical shim: only 'run … -- <cmd>' and 'secrets get … --plain' are supported here (credentials are injected by the OneCLI gateway)." >&2
+    exit 64
+    ;;
+esac

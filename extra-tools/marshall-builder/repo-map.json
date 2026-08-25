@@ -1,0 +1,61 @@
+{
+  "_comment": "Catalog whitelist for MarshallBuilder's prepare_workspace tool — ported from projects/marshall-cli/config/repo-map.yml (JSON here since the MCP server is zero-dependency, no YAML parser). Keep in sync until marshall-cli is decommissioned (plan Phase 4); this is the one duplication that migration knowingly accepts rather than adding a YAML dependency for.",
+  "projects": {
+    "pp-hub": {
+      "git_url": "git@github.com:partnerprogrammer/pp-brain.git",
+      "subpath": "projects/pp-hub",
+      "description": "Central hub for Partner Programmer's internal dashboards and ClickUp automations. Next.js 16 + Prisma + Neon Postgres, deployed on Vercel."
+    },
+    "marshall-assistant": {
+      "git_url": "git@github.com:partnerprogrammer/pp-brain.git",
+      "subpath": "projects/marshall-assistant",
+      "description": "Marshall's own versionable recipe (this project) — skills, persona, config, install/apply scripts for the NanoClaw v2 instance."
+    },
+    "breez-hub": {
+      "git_url": "git@github.com:partnerprogrammer/breez-brain.git",
+      "subpath": "projects/breez-hub",
+      "description": "Breez's real-time sync platform connecting WooCommerce orders to HubSpot CRM. Next.js 16 + Prisma + Supabase Postgres, deployed on Vercel."
+    },
+    "breez-website": {
+      "git_url": "git@github.com:partnerprogrammer/breez-brain.git",
+      "subpath": "projects/breez-website",
+      "description": "Breez's main WordPress/WooCommerce e-commerce platform for student rentals. PHP, Vite, React. Deployed via GitHub Actions to Cloudways."
+    },
+    "breez-hubspot-app": {
+      "git_url": "git@github.com:partnerprogrammer/breez-brain.git",
+      "subpath": "projects/breez-hubspot-app",
+      "description": "HubSpot Developer Project — single source of truth for Breez's HubSpot CRM configuration (custom properties, pipelines) and the help-center CMS theme. HubSpot CLI, TypeScript, HubL."
+    },
+    "breez-ai-agent": {
+      "git_url": "git@github.com:partnerprogrammer/breez-brain.git",
+      "subpath": "projects/breez-ai-agent",
+      "description": "Documentation and configuration for \"Breeze\", Breez's HubSpot AI customer support agent."
+    },
+    "logistics-app": {
+      "git_url": "git@github.com:partnerprogrammer/breez-brain.git",
+      "subpath": "projects/logistics-app",
+      "description": "Breez's delivery/logistics dashboard (MyFridgeRentalWeb), vendored read-only from a repo Breez's own logistics developer owns (not PP). Context only — never an implement target.",
+      "readonly": true
+    },
+    "logistics-mobile-app": {
+      "git_url": "git@github.com:partnerprogrammer/breez-brain.git",
+      "subpath": "projects/logistics-mobile-app",
+      "description": "Flutter mobile app for Breez's field logistics operations (order management, signature capture, customer messaging). Releases cut from this repo's `staging` branch, not `main` — check before opening a PR."
+    },
+    "knowledge-base-faq": {
+      "git_url": "git@github.com:partnerprogrammer/breez-brain.git",
+      "subpath": "projects/knowledge-base-faq",
+      "description": "Structured FAQ data (JSON) for Breez customer support channels, used by the Breeze AI agent and support team."
+    },
+    "knowledge-base-articles": {
+      "git_url": "git@github.com:partnerprogrammer/breez-brain.git",
+      "subpath": "projects/knowledge-base-articles",
+      "description": "Detailed help articles and guides (Markdown) for Breez customers, used by the Breeze AI agent and support team."
+    },
+    "pp-stack": {
+      "git_url": "git@github.com:partnerprogrammer/pp-stack.git",
+      "subpath": ".",
+      "description": "Partner Programmer's shared Claude Code skills package (this is Marshall's own /story, /report-issue, /work, /pp-slack-update, /pp-auto-pilot, /pp-review-pack, etc.) — standalone repo, not part of pp-brain or breez-brain. CAUTION: this repo's dev checkout doubles as the live install at ~/.claude/skills/pp-stack on every PP developer's machine — a change here affects every Claude Code session on the machine the moment it lands on main, not just after a deploy. Treat with the same care as touching shared infra."
+    }
+  }
+}

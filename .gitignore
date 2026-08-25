@@ -51,3 +51,9 @@ AGENTS.md
 docs/maintainer-guide.md
 docs/drafts/
 forks.md
+
+# Vendored release binary — re-fetch via setup script, not versioned
+extra-tools/gh/
+
+# Claude Code isolated worktrees (harness-managed, not project content)
+.claude/worktrees/
