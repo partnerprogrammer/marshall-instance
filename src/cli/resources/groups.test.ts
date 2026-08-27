@@ -305,4 +305,24 @@ describe('groups config add-mount / remove-mount (host-only)', () => {
     expect(rm.ok).toBe(true);
     expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([]);
   });
+
+  it('rejects unknown providers and stores installed names normalized', async () => {
+    const GID = 'ag-provider';
+    await createAgentGroup({ id: GID, name: 'p', folder: 'p', agent_provider: null, created_at: now() });
+    await ensureContainerConfig(GID);
+
+    const rejected = await dispatch(
+      { id: 'p1', command: 'groups-config-update', args: { id: GID, provider: 'missing' } },
+      { caller: 'host' },
+    );
+    expect(rejected.ok).toBe(false);
+    expect((await getContainerConfig(GID))!.provider).toBeNull();
+
+    const accepted = await dispatch(
+      { id: 'p2', command: 'groups-config-update', args: { id: GID, provider: 'CLAUDE' } },
+      { caller: 'host' },
+    );
+    expect(accepted.ok).toBe(true);
+    expect((await getContainerConfig(GID))!.provider).toBe('claude');
+  });
 });

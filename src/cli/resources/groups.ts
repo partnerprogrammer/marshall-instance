@@ -22,6 +22,7 @@ import {
 import { getSessionDriver } from '../../drivers/index.js';
 import { assertValidGroupFolder, groupFolderExistsOnDisk } from '../../group-folder.js';
 import { initGroupFilesystem } from '../../group-init.js';
+import { requireProviderName } from '../../provider-name.js';
 import { createAgentFromTemplate } from '../../templates/create-agent.js';
 import {
   formatRestampResult,
@@ -392,7 +393,7 @@ registerResource({
             | 'timezone'
           >
         > = {};
-        if (args.provider !== undefined) updates.provider = args.provider as string;
+        if (args.provider !== undefined) updates.provider = requireProviderName(String(args.provider));
         const timezone = parseTimezoneFlag(args.timezone);
         if (timezone !== undefined) updates.timezone = timezone;
         if (args.model !== undefined) updates.model = args.model as string;
