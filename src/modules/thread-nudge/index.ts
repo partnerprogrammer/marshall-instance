@@ -79,8 +79,12 @@ async function slackPermalink(mg: MessagingGroup, threadId: string | null): Prom
   }
 }
 
+/** Always ends in "…" — a consistent visual marker that this is a quoted
+ *  snippet of the other thread, not the whole message, whether or not this
+ *  particular one happened to need truncating (live feedback, CUP-4868). */
 function snippet(text: string): string {
-  return text.length > NUDGE_SNIPPET_MAX_CHARS ? `${text.slice(0, NUDGE_SNIPPET_MAX_CHARS - 1)}…` : text;
+  const cut = text.length > NUDGE_SNIPPET_MAX_CHARS ? text.slice(0, NUDGE_SNIPPET_MAX_CHARS - 1) : text;
+  return `${cut}…`;
 }
 
 async function nudgeText(mg: MessagingGroup, candidate: CandidateThread): Promise<string> {

@@ -227,7 +227,10 @@ describe('checkSession', () => {
     // Never the raw internal thread_id — a live-hit this regression test guards against.
     expect(content.text).not.toContain('slack:C1:1.0');
     expect(content.text).toContain('https://pp.slack.com/archives/C1/p1710000000000000');
-    expect(content.text).toContain('the deploy pipeline is stuck');
+    // The quote always ends in "…" — a consistent "this is a snippet" marker,
+    // even here where the quoted text is short enough to need no truncation
+    // (live feedback: it read as an odd, abruptly-complete sentence without it).
+    expect(content.text).toContain('the deploy pipeline is stuck…');
   });
 
   it('still posts a nudge (without a link) when the Slack permalink lookup fails', async () => {
