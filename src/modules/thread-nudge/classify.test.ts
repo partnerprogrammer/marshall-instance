@@ -5,13 +5,19 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+interface HistoryRow {
+  timestamp: string;
+  kind: string;
+  content: string;
+}
+
 let siblingSessions: Array<{
   id: string;
   status: string;
   messaging_group_id: string | null;
   thread_id: string | null;
 }> = [];
-let rootsBySession: Record<string, { timestamp: string; content: string } | undefined> = {};
+let historyBySession: Record<string, HistoryRow[] | undefined> = {};
 
 vi.mock('../../db/sessions.js', () => ({
   getSessionsByAgentGroup: () => siblingSessions,
@@ -19,7 +25,7 @@ vi.mock('../../db/sessions.js', () => ({
 }));
 vi.mock('../../session-manager.js', () => ({
   withExistingMailboxSession: (_g: string, sessionId: string, fn: (mailbox: unknown) => unknown) =>
-    fn({ getConversationRoot: () => rootsBySession[sessionId] }),
+    fn({ getInboundHistory: () => historyBySession[sessionId] ?? [] }),
 }));
 
 const { collectCandidates, findRelatedThread, significantKeywords, mentionedUserIds } = await import('./classify.js');
@@ -28,16 +34,24 @@ function chat(text: string, senderId = 'U1'): string {
   return JSON.stringify({ text, sender: 'someone', senderId });
 }
 
-const NEW_SESSION = {
+/** A sibling's inbound history as getInboundHistory returns it: newest-first
+ *  (seq DESC). A single real opener row, matching the common case. */
+function rootHistory(timestamp: string, text: string, senderId = 'U1'): HistoryRow[] {
+  return [{ timestamp, kind: 'chat-sdk', content: chat(text, senderId) }];
+}
+
+const NEW_SESSION_BASE = {
   id: 'sess-new',
   agent_group_id: 'ag-1',
   messaging_group_id: 'mg-1',
   thread_id: 'slack:C1:9.0',
-} as never;
+  created_at: new Date().toISOString(),
+};
+const NEW_SESSION = NEW_SESSION_BASE as never;
 
 beforeEach(() => {
   siblingSessions = [];
-  rootsBySession = {};
+  historyBySession = {};
 });
 
 describe('collectCandidates', () => {
@@ -48,15 +62,9 @@ describe('collectCandidates', () => {
       { id: 'sess-other-channel', status: 'active', messaging_group_id: 'mg-2', thread_id: 'slack:C2:1.0' },
       { id: 'sess-closed', status: 'closed', messaging_group_id: 'mg-1', thread_id: 'slack:C1:3.0' },
     ];
-    rootsBySession = {
-      'sess-old-1': {
-        timestamp: new Date(Date.now() - 60 * 60_000).toISOString(),
-        content: chat('deploy pipeline is stuck'),
-      },
-      'sess-old-2': {
-        timestamp: new Date(Date.now() - 30 * 60_000).toISOString(),
-        content: chat('client asked about invoice'),
-      },
+    historyBySession = {
+      'sess-old-1': rootHistory(new Date(Date.now() - 60 * 60_000).toISOString(), 'deploy pipeline is stuck'),
+      'sess-old-2': rootHistory(new Date(Date.now() - 30 * 60_000).toISOString(), 'client asked about invoice'),
     };
 
     const candidates = await collectCandidates('ag-1', NEW_SESSION, 'mg-1');
@@ -69,7 +77,7 @@ describe('collectCandidates', () => {
       { id: 'sess-task', status: 'active', messaging_group_id: 'mg-1', thread_id: 'system:tasks:t-1' },
       { id: 'sess-no-root', status: 'active', messaging_group_id: 'mg-1', thread_id: 'slack:C1:1.0' },
     ];
-    rootsBySession = {};
+    historyBySession = {};
 
     const candidates = await collectCandidates('ag-1', NEW_SESSION, 'mg-1');
 
@@ -78,11 +86,76 @@ describe('collectCandidates', () => {
 
   it('excludes siblings whose root message is older than the recency window', async () => {
     siblingSessions = [{ id: 'sess-stale', status: 'active', messaging_group_id: 'mg-1', thread_id: 'slack:C1:1.0' }];
-    rootsBySession = {
-      'sess-stale': { timestamp: '2020-01-01T00:00:00Z', content: chat('ancient thread') },
+    historyBySession = {
+      'sess-stale': rootHistory('2020-01-01T00:00:00Z', 'ancient thread'),
     };
 
     const candidates = await collectCandidates('ag-1', NEW_SESSION, 'mg-1');
+
+    expect(candidates).toEqual([]);
+  });
+
+  it('finds a sibling whose only message never triggered its container (wake=false) — the CUP-4868 target case', async () => {
+    // Regression: mailbox.getConversationRoot() only returns rows written
+    // with trigger=1 (i.e. wake=true), so a sibling that only ever posted a
+    // top-level message without mentioning the bot was previously invisible
+    // as a candidate — exactly the sessions this module exists to nudge.
+    siblingSessions = [
+      { id: 'sess-never-engaged', status: 'active', messaging_group_id: 'mg-1', thread_id: 'slack:C1:1.0' },
+    ];
+    historyBySession = {
+      'sess-never-engaged': rootHistory(new Date(Date.now() - 5 * 60_000).toISOString(), 'deploy pipeline is stuck'),
+    };
+
+    const candidates = await collectCandidates('ag-1', NEW_SESSION, 'mg-1');
+
+    expect(candidates.map((c) => c.sessionId)).toEqual(['sess-never-engaged']);
+  });
+
+  it('skips cross-session-context echo rows seeded before the real opener', async () => {
+    // backfill.ts writes echo rows at LOWER seq than the real triggering
+    // message, so getInboundHistory's oldest-first walk would otherwise
+    // return an echo (someone else's message, quoted for context) as this
+    // sibling's "opener".
+    siblingSessions = [{ id: 'sess-seeded', status: 'active', messaging_group_id: 'mg-1', thread_id: 'slack:C1:1.0' }];
+    historyBySession = {
+      'sess-seeded': [
+        {
+          timestamp: new Date(Date.now() - 4 * 60_000).toISOString(),
+          kind: 'chat-sdk',
+          content: chat('the real opening message', 'U2'),
+        },
+        {
+          timestamp: new Date(Date.now() - 6 * 60_000).toISOString(),
+          kind: 'chat',
+          content: JSON.stringify({
+            text: 'echoed context from another thread',
+            senderId: 'U3',
+            echo: { surface: 'x', label: 'y' },
+          }),
+        },
+      ],
+    };
+
+    const candidates = await collectCandidates('ag-1', NEW_SESSION, 'mg-1');
+
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]?.rootText).toBe('the real opening message');
+  });
+
+  it('excludes a sibling whose opener is newer than the session being checked', async () => {
+    // A message can only continue something said BEFORE it. A sibling
+    // created after `session` must never be offered as a candidate, even if
+    // it would otherwise score well — this is the invariant index.ts's
+    // memoization relies on (a decided session's outcome never changes on a
+    // later tick because candidates are always older, never newer).
+    const newSession = { ...NEW_SESSION_BASE, created_at: new Date(Date.now() - 10 * 60_000).toISOString() } as never;
+    siblingSessions = [{ id: 'sess-future', status: 'active', messaging_group_id: 'mg-1', thread_id: 'slack:C1:1.0' }];
+    historyBySession = {
+      'sess-future': rootHistory(new Date().toISOString(), 'deploy pipeline is stuck'),
+    };
+
+    const candidates = await collectCandidates('ag-1', newSession, 'mg-1');
 
     expect(candidates).toEqual([]);
   });

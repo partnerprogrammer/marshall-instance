@@ -7,11 +7,25 @@
  * semantic index or embeddings, same posture as the rest of
  * cross-session-context: recency-bounded candidates + keyword/mention
  * overlap. Tune thresholds in config.ts during internal testing.
+ *
+ * Root-message lookup deliberately does NOT use
+ * mailbox.getConversationRoot() — that method means "the message that
+ * triggered container wake" (its own query filters `trigger = 1`), which is
+ * undefined by construction for exactly the sessions this module exists to
+ * catch: a top-level reply that never mentions the bot creates a session
+ * with wake=false and so never gets a trigger=1 row. getThreadOpener()
+ * below reads inbound history directly instead — see its own doc comment.
  */
 import { getSessionsByAgentGroup, isTaskThread } from '../../db/sessions.js';
 import { withExistingMailboxSession } from '../../session-manager.js';
 import type { Session } from '../../types.js';
-import { CANDIDATE_LIMIT, CANDIDATE_MAX_AGE_MINUTES, MIN_KEYWORD_LENGTH, MIN_SHARED_KEYWORDS } from './config.js';
+import {
+  CANDIDATE_LIMIT,
+  CANDIDATE_MAX_AGE_MINUTES,
+  MIN_KEYWORD_LENGTH,
+  MIN_SHARED_KEYWORDS,
+  ROOT_LOOKUP_HISTORY_LIMIT,
+} from './config.js';
 
 export interface CandidateThread {
   sessionId: string;
@@ -48,12 +62,48 @@ const STOPWORDS = new Set([
   'hello',
 ]);
 
-function parseContent(raw: string): { text?: string; sender?: string; senderId?: string } {
+function parseContent(raw: string): { text?: string; sender?: string; senderId?: string; echo?: unknown } {
   try {
-    return JSON.parse(raw) as { text?: string; sender?: string; senderId?: string };
+    return JSON.parse(raw) as { text?: string; sender?: string; senderId?: string; echo?: unknown };
   } catch {
     return {};
   }
+}
+
+export interface ThreadOpener {
+  timestamp: string;
+  text: string;
+  senderId: string;
+}
+
+/**
+ * The human message that actually opened this session's thread.
+ *
+ * Deliberately not mailbox.getConversationRoot() — see this file's module
+ * doc comment. Instead, scans inbound history (newest-first) for the oldest
+ * row that's a real platform chat message: kind chat/chat-sdk, not a
+ * cross-session-context echo (fan.ts and backfill.ts both mark their rows
+ * with an `echo` key — backfill.ts in particular writes echoes at LOWER seq
+ * than the real opener, since it seeds a brand-new session before the
+ * triggering message lands, so "oldest chat row" alone would return an
+ * echo), and not a host-injected system message (mirrors backfill.ts's own
+ * senderId/sender 'system' guard).
+ */
+export async function getThreadOpener(agentGroupId: string, sessionId: string): Promise<ThreadOpener | undefined> {
+  const history = await withExistingMailboxSession(agentGroupId, sessionId, (mailbox) =>
+    mailbox.getInboundHistory(ROOT_LOOKUP_HISTORY_LIMIT),
+  );
+  if (!history) return undefined;
+
+  for (let i = history.length - 1; i >= 0; i--) {
+    const row = history[i]!;
+    if (row.kind !== 'chat' && row.kind !== 'chat-sdk') continue;
+    const c = parseContent(row.content);
+    if (c.echo !== undefined) continue;
+    if (!c.text || !c.senderId || c.senderId === 'system' || c.sender === 'system') continue;
+    return { timestamp: row.timestamp, text: c.text, senderId: c.senderId };
+  }
+  return undefined;
 }
 
 /** Lowercased, punctuation-stripped, stopword- and short-token-filtered keyword set. */
@@ -95,23 +145,29 @@ export async function collectCandidates(
   if (siblings.length === 0) return [];
 
   const cutoff = Date.now() - CANDIDATE_MAX_AGE_MINUTES * 60_000;
+  // A message can only be a continuation of something said BEFORE it — never
+  // after. Without this, a sibling created later than `session` (e.g. by
+  // another poll target that happens to score higher) could get picked as
+  // a "candidate" the new message is supposedly replying to, which breaks
+  // the memoization safety argument in index.ts (a decided session's
+  // outcome is assumed to never change on a later tick precisely because
+  // candidates are always older, never newer).
+  const sessionCreatedAt = Date.parse(session.created_at);
   const candidates: CandidateThread[] = [];
 
   for (const sibling of siblings) {
-    const root = await withExistingMailboxSession(agentGroupId, sibling.id, (mailbox) => mailbox.getConversationRoot());
-    if (!root) continue;
-    const rootTime = Date.parse(root.timestamp);
+    const opener = await getThreadOpener(agentGroupId, sibling.id);
+    if (!opener) continue;
+    const rootTime = Date.parse(opener.timestamp);
     if (Number.isNaN(rootTime) || rootTime < cutoff) continue;
-
-    const c = parseContent(root.content);
-    if (!c.text || !c.senderId) continue;
+    if (!Number.isNaN(sessionCreatedAt) && rootTime >= sessionCreatedAt) continue;
 
     candidates.push({
       sessionId: sibling.id,
       threadId: sibling.thread_id,
-      rootText: c.text,
-      rootSenderId: c.senderId,
-      rootTimestamp: root.timestamp,
+      rootText: opener.text,
+      rootSenderId: opener.senderId,
+      rootTimestamp: opener.timestamp,
     });
   }
 

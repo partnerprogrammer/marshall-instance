@@ -29,17 +29,8 @@ import { getSessionsByAgentGroup, isTaskThread } from '../../db/sessions.js';
 import { log } from '../../log.js';
 import { withExistingMailboxSession, writeOutboundDirect } from '../../session-manager.js';
 import type { MessagingGroup, Session } from '../../types.js';
-import { collectCandidates, findRelatedThread } from './classify.js';
+import { collectCandidates, findRelatedThread, getThreadOpener } from './classify.js';
 import { NUDGE_CHECK_WINDOW_MINUTES, POLL_INTERVAL_MS, THREAD_NUDGE_MESSAGING_GROUPS } from './config.js';
-
-function parseMessageText(raw: string): string | null {
-  try {
-    const c = JSON.parse(raw) as { text?: string };
-    return c.text ?? null;
-  } catch {
-    return null;
-  }
-}
 
 function nudgeText(threadId: string | null): string {
   const pointer = threadId ? `the thread above (<${threadId}>)` : 'the related thread above';
@@ -89,11 +80,9 @@ export async function checkSession(agentGroupId: string, mg: MessagingGroup, ses
   const createdAt = Date.parse(session.created_at);
   if (Number.isNaN(createdAt) || Date.now() - createdAt > NUDGE_CHECK_WINDOW_MINUTES * 60_000) return;
 
-  const root = await withExistingMailboxSession(agentGroupId, session.id, (mailbox) => mailbox.getConversationRoot());
-  if (!root) return;
-
-  const text = parseMessageText(root.content);
-  if (!text) return;
+  const opener = await getThreadOpener(agentGroupId, session.id);
+  if (!opener) return;
+  const text = opener.text;
 
   if (await alreadyNudged(agentGroupId, session.id)) {
     decided.set(session.id, createdAt);

@@ -6,6 +6,22 @@
  * (recency + keyword/mention overlap), not a semantic index — same posture
  * as the rest of cross-session context. Tune these during internal testing
  * before ever widening MESSAGING_GROUPS to client-facing channels.
+ *
+ * Poll-based, not event-based: registerSessionCreatedHook only fires for
+ * sessions the router actually engages (wake=true), which in Slack group
+ * channels means "someone mentioned the bot." A stray top-level reply
+ * between humans that never mentions the bot creates a session (wake=false)
+ * but never reaches that hook — confirmed live on CUP-4868's own test
+ * traffic. This module instead polls on its own timer, matching
+ * host-sweep.ts's plain setInterval pattern — no container wake, so the
+ * interval is cheap to run often.
+ *
+ * The poll interval and the nudge-eligibility window are independent knobs:
+ * index.ts memoizes each session's decision after its first real check, so
+ * a shorter POLL_INTERVAL_MS only shrinks how soon a *new* session gets
+ * looked at — it does not re-scan sessions already decided. Widening
+ * NUDGE_CHECK_WINDOW_MINUTES is a UX call (how late a reply can still
+ * usefully be nudged), not a cost one.
  */
 import { readEnvFile } from '../../env.js';
 
@@ -28,12 +44,38 @@ export const THREAD_NUDGE_MESSAGING_GROUPS = new Set(
     .filter(Boolean),
 );
 
+/** How often to scan allowlisted channels for un-decided top-level sessions.
+ *  No container wake involved (pure host-side SQLite reads) and each
+ *  session is only ever really checked once (see the module doc comment in
+ *  index.ts), so this can run faster than a cron-scheduled agent task ever
+ *  could without multiplying work — 45s is a UX choice (how soon a stray
+ *  reply gets caught), not a cost tradeoff. */
+export const POLL_INTERVAL_MS = 45_000;
+
+/** A session older than this is no longer worth nudging — "you should have
+ *  replied in the thread" stops being useful advice once the moment has
+ *  passed. Independent of CANDIDATE_MAX_AGE_MINUTES (how far back we look
+ *  for candidates a message might belong to) and independent of
+ *  POLL_INTERVAL_MS (see above) — this is purely how generous the window
+ *  is, not how much repeat work a shorter poll causes. */
+export const NUDGE_CHECK_WINDOW_MINUTES = 30;
+
 /** How many recent sibling sessions (same messaging group) to consider as candidates. */
 export const CANDIDATE_LIMIT = 12;
 
 /** Sibling sessions whose root message is older than this are never candidates —
  *  a thread from last week isn't "the thing you just replied to at the top level". */
 export const CANDIDATE_MAX_AGE_MINUTES = 180;
+
+/** How many recent inbound rows (newest-first) to scan when looking for a
+ *  session's real opening message (classify.ts's getThreadOpener). A brand
+ *  new session can be seeded with cross-session-context echo rows at LOWER
+ *  seq than the real opener (backfill.ts writes them before the triggering
+ *  message), and live fan-out keeps adding more while the session sits
+ *  unengaged — this needs enough headroom to still find the opener
+ *  underneath that traffic within NUDGE_CHECK_WINDOW_MINUTES. Cheap: one
+ *  indexed local SQLite read. */
+export const ROOT_LOOKUP_HISTORY_LIMIT = 60;
 
 /** Minimum distinct shared significant keywords between the new message and a
  *  candidate's root message for a keyword-overlap match. */

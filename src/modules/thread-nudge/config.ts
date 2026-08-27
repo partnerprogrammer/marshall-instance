@@ -67,6 +67,16 @@ export const CANDIDATE_LIMIT = 12;
  *  a thread from last week isn't "the thing you just replied to at the top level". */
 export const CANDIDATE_MAX_AGE_MINUTES = 180;
 
+/** How many recent inbound rows (newest-first) to scan when looking for a
+ *  session's real opening message (classify.ts's getThreadOpener). A brand
+ *  new session can be seeded with cross-session-context echo rows at LOWER
+ *  seq than the real opener (backfill.ts writes them before the triggering
+ *  message), and live fan-out keeps adding more while the session sits
+ *  unengaged — this needs enough headroom to still find the opener
+ *  underneath that traffic within NUDGE_CHECK_WINDOW_MINUTES. Cheap: one
+ *  indexed local SQLite read. */
+export const ROOT_LOOKUP_HISTORY_LIMIT = 60;
+
 /** Minimum distinct shared significant keywords between the new message and a
  *  candidate's root message for a keyword-overlap match. */
 export const MIN_SHARED_KEYWORDS = 2;

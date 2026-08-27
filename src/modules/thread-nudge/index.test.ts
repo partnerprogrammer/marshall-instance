@@ -8,10 +8,16 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+interface HistoryRow {
+  timestamp: string;
+  kind: string;
+  content: string;
+}
+
 const messagingGroups: Record<string, unknown> = {};
 const wiringsByMg: Record<string, Array<{ agent_group_id: string; session_mode: string }>> = {};
 const sessionsByAgentGroup: Record<string, Array<Record<string, unknown>>> = {};
-const rootsBySession: Record<string, { timestamp: string; content: string } | undefined> = {};
+const historyBySession: Record<string, HistoryRow[]> = {};
 const outboundHistoryBySession: Record<string, Array<{ timestamp: string; kind: string; content: string }>> = {};
 const collectCandidates = vi.fn();
 const findRelatedThread = vi.fn();
@@ -28,12 +34,22 @@ vi.mock('../../db/sessions.js', () => ({
 vi.mock('../../session-manager.js', () => ({
   withExistingMailboxSession: async (_g: string, sessionId: string, action: (m: unknown) => unknown) =>
     action({
-      getConversationRoot: () => rootsBySession[sessionId],
+      getInboundHistory: () => historyBySession[sessionId] ?? [],
       getOutboundHistory: () => outboundHistoryBySession[sessionId] ?? [],
     }),
   writeOutboundDirect,
 }));
-vi.mock('./classify.js', () => ({ collectCandidates, findRelatedThread }));
+// getThreadOpener is left as the REAL implementation (only collectCandidates
+// and findRelatedThread — the actual classification step — are mocked), so
+// these tests exercise it against the historyBySession fixtures above via
+// the mocked session-manager. That's deliberate: getThreadOpener's own
+// filtering edge cases (echo rows, system senders) are covered in
+// classify.test.ts; here it just needs to correctly wire a wake=false
+// session's history through to checkSession.
+vi.mock('./classify.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./classify.js')>();
+  return { ...actual, collectCandidates, findRelatedThread };
+});
 vi.mock('./config.js', () => ({
   THREAD_NUDGE_MESSAGING_GROUPS: new Set(['mg-internal']),
   // Large enough that the module-level setInterval (started at import time
@@ -42,14 +58,24 @@ vi.mock('./config.js', () => ({
   NUDGE_CHECK_WINDOW_MINUTES: 30,
   CANDIDATE_LIMIT: 12,
   CANDIDATE_MAX_AGE_MINUTES: 180,
+  ROOT_LOOKUP_HISTORY_LIMIT: 60,
   MIN_SHARED_KEYWORDS: 2,
   MIN_KEYWORD_LENGTH: 4,
 }));
 
 const { checkSession, pollThreadNudge } = await import('./index.js');
 
-function chat(text: string): string {
-  return JSON.stringify({ text });
+function chat(text: string, senderId = 'U1'): string {
+  return JSON.stringify({ text, senderId });
+}
+
+/** Sets a session's inbound history to a single real opener row — the
+ *  common case. Deliberately kind chat-sdk with no `trigger`/`echo`
+ *  concept in play, since getThreadOpener no longer depends on either
+ *  (see classify.ts) — this is what a wake=false session's history
+ *  actually looks like. */
+function setOpener(sessionId: string, text: string, timestamp = new Date().toISOString()): void {
+  historyBySession[sessionId] = [{ timestamp, kind: 'chat-sdk', content: chat(text) }];
 }
 
 let sessionCounter = 0;
@@ -73,7 +99,7 @@ beforeEach(() => {
   for (const key of Object.keys(messagingGroups)) delete messagingGroups[key];
   for (const key of Object.keys(wiringsByMg)) delete wiringsByMg[key];
   for (const key of Object.keys(sessionsByAgentGroup)) delete sessionsByAgentGroup[key];
-  for (const key of Object.keys(rootsBySession)) delete rootsBySession[key];
+  for (const key of Object.keys(historyBySession)) delete historyBySession[key];
   for (const key of Object.keys(outboundHistoryBySession)) delete outboundHistoryBySession[key];
   collectCandidates.mockReset();
   findRelatedThread.mockReset();
@@ -88,7 +114,7 @@ describe('checkSession', () => {
 
   it('skips sessions older than the nudge check window', async () => {
     const session = freshSession({ created_at: new Date(Date.now() - 60 * 60_000).toISOString() });
-    rootsBySession[session.id] = { timestamp: new Date().toISOString(), content: chat('hello') };
+    setOpener(session.id, 'hello');
     await checkSession('ag-1', MG, session as never);
     expect(collectCandidates).not.toHaveBeenCalled();
   });
@@ -100,14 +126,14 @@ describe('checkSession', () => {
 
   it('skips when the root message has no parseable text', async () => {
     const session = freshSession();
-    rootsBySession[session.id] = { timestamp: new Date().toISOString(), content: 'not json' };
+    historyBySession[session.id] = [{ timestamp: new Date().toISOString(), kind: 'chat-sdk', content: 'not json' }];
     await checkSession('ag-1', MG, session as never);
     expect(collectCandidates).not.toHaveBeenCalled();
   });
 
   it('skips a session already nudged (persisted outbound history)', async () => {
     const session = freshSession();
-    rootsBySession[session.id] = { timestamp: new Date().toISOString(), content: chat('following up on the deploy') };
+    setOpener(session.id, 'following up on the deploy');
     outboundHistoryBySession[session.id] = [
       {
         timestamp: new Date().toISOString(),
@@ -121,7 +147,7 @@ describe('checkSession', () => {
 
   it('does not re-nudge just because unrelated outbound history exists', async () => {
     const session = freshSession();
-    rootsBySession[session.id] = { timestamp: new Date().toISOString(), content: chat('following up on the deploy') };
+    setOpener(session.id, 'following up on the deploy');
     outboundHistoryBySession[session.id] = [
       { timestamp: new Date().toISOString(), kind: 'chat', content: JSON.stringify({ text: 'unrelated agent reply' }) },
     ];
@@ -132,7 +158,7 @@ describe('checkSession', () => {
 
   it('skips when there are no candidates', async () => {
     const session = freshSession();
-    rootsBySession[session.id] = { timestamp: new Date().toISOString(), content: chat('following up on the deploy') };
+    setOpener(session.id, 'following up on the deploy');
     collectCandidates.mockResolvedValue([]);
     await checkSession('ag-1', MG, session as never);
     expect(findRelatedThread).not.toHaveBeenCalled();
@@ -141,7 +167,7 @@ describe('checkSession', () => {
 
   it('skips when no candidate is related', async () => {
     const session = freshSession();
-    rootsBySession[session.id] = { timestamp: new Date().toISOString(), content: chat('good morning') };
+    setOpener(session.id, 'good morning');
     collectCandidates.mockResolvedValue([{ sessionId: 'sess-a', threadId: 'slack:C1:1.0' }]);
     findRelatedThread.mockReturnValue(null);
     await checkSession('ag-1', MG, session as never);
@@ -150,7 +176,7 @@ describe('checkSession', () => {
 
   it('posts a marked public reply in the session own thread when a related thread is found', async () => {
     const session = freshSession();
-    rootsBySession[session.id] = { timestamp: new Date().toISOString(), content: chat('following up on the deploy') };
+    setOpener(session.id, 'following up on the deploy');
     collectCandidates.mockResolvedValue([{ sessionId: 'sess-a', threadId: 'slack:C1:1.0' }]);
     findRelatedThread.mockReturnValue({
       candidate: { sessionId: 'sess-a', threadId: 'slack:C1:1.0' },
@@ -172,7 +198,7 @@ describe('checkSession', () => {
 
   it('memoizes a no-match decision — a later call for the same session does no further work', async () => {
     const session = freshSession();
-    rootsBySession[session.id] = { timestamp: new Date().toISOString(), content: chat('good morning') };
+    setOpener(session.id, 'good morning');
     collectCandidates.mockResolvedValue([]);
 
     await checkSession('ag-1', MG, session as never);
@@ -184,7 +210,7 @@ describe('checkSession', () => {
 
   it('memoizes a nudged decision — a later call for the same session never posts twice', async () => {
     const session = freshSession();
-    rootsBySession[session.id] = { timestamp: new Date().toISOString(), content: chat('following up on the deploy') };
+    setOpener(session.id, 'following up on the deploy');
     collectCandidates.mockResolvedValue([{ sessionId: 'sess-a', threadId: 'slack:C1:1.0' }]);
     findRelatedThread.mockReturnValue({
       candidate: { sessionId: 'sess-a', threadId: 'slack:C1:1.0' },
@@ -210,7 +236,7 @@ describe('pollThreadNudge', () => {
     wiringsByMg['mg-internal'] = [{ agent_group_id: 'ag-1', session_mode: 'per-thread' }];
     const session = freshSession();
     sessionsByAgentGroup['ag-1'] = [session];
-    rootsBySession[session.id] = { timestamp: new Date().toISOString(), content: chat('hi') };
+    setOpener(session.id, 'hi');
     await pollThreadNudge();
     expect(collectCandidates).not.toHaveBeenCalled();
   });
@@ -220,7 +246,7 @@ describe('pollThreadNudge', () => {
     wiringsByMg['mg-internal'] = [{ agent_group_id: 'ag-1', session_mode: 'shared' }];
     const session = freshSession();
     sessionsByAgentGroup['ag-1'] = [session];
-    rootsBySession[session.id] = { timestamp: new Date().toISOString(), content: chat('hi') };
+    setOpener(session.id, 'hi');
     await pollThreadNudge();
     expect(collectCandidates).not.toHaveBeenCalled();
   });
@@ -232,7 +258,7 @@ describe('pollThreadNudge', () => {
     const closed = freshSession({ status: 'closed', messaging_group_id: 'mg-internal' });
     const otherMg = freshSession({ status: 'active', messaging_group_id: 'mg-other' });
     sessionsByAgentGroup['ag-1'] = [active, closed, otherMg];
-    rootsBySession[active.id] = { timestamp: new Date().toISOString(), content: chat('hi there') };
+    setOpener(active.id, 'hi there');
     collectCandidates.mockResolvedValue([]);
 
     await pollThreadNudge();
@@ -247,8 +273,8 @@ describe('pollThreadNudge', () => {
     const bad = freshSession();
     const good = freshSession();
     sessionsByAgentGroup['ag-1'] = [bad, good];
-    rootsBySession[good.id] = { timestamp: new Date().toISOString(), content: chat('hi there') };
-    rootsBySession[bad.id] = { timestamp: new Date().toISOString(), content: chat('hi there too') };
+    setOpener(good.id, 'hi there');
+    setOpener(bad.id, 'hi there too');
     collectCandidates.mockImplementation(async (_ag: string, session: { id: string }) => {
       if (session.id === good.id) return [];
       throw new Error('boom');
@@ -263,7 +289,7 @@ describe('pollThreadNudge', () => {
     wiringsByMg['mg-internal'] = [{ agent_group_id: 'ag-1', session_mode: 'per-thread' }];
     const session = freshSession();
     sessionsByAgentGroup['ag-1'] = [session];
-    rootsBySession[session.id] = { timestamp: new Date().toISOString(), content: chat('hi there') };
+    setOpener(session.id, 'hi there');
     collectCandidates.mockResolvedValue([]);
 
     await pollThreadNudge();
