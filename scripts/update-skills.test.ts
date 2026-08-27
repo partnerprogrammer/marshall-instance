@@ -44,6 +44,11 @@ describe('installed skill detection', () => {
     write(root, 'src/channels/index.ts', "import './cli.js';\nimport './slack.js';\n");
     write(root, 'src/providers/index.ts', "import './opencode.js';\n");
     write(root, 'container/agent-runner/src/providers/index.ts', "import './claude.js';\nimport './opencode.js';\n");
+    // A barrel import only counts as a detected skill when its own SKILL.md
+    // exists (see detectInstalledSkills) — companion imports with no skill
+    // of their own are excluded.
+    write(root, '.claude/skills/add-slack/SKILL.md', '# Add Slack\n');
+    write(root, '.claude/skills/add-opencode/SKILL.md', '# Add OpenCode\n');
 
     expect(detectInstalledSkills(root)).toEqual([
       { name: 'opencode', skillName: 'add-opencode', kind: 'provider' },

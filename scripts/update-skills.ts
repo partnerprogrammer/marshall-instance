@@ -91,9 +91,19 @@ function readImports(file: string): string[] {
 }
 
 export function detectInstalledSkills(root: string): InstalledSkill[] {
+  // A barrel import only names an independently-refreshable skill when its
+  // own SKILL.md exists. Some skills (e.g. add-slack) now bundle a second,
+  // companion self-registration line (e.g. slack-a2a-guard.js) for a file
+  // that isn't a standalone channel/provider — it has no skill of its own
+  // to refresh, and was already refreshed as part of its parent skill's
+  // copy step. Without this filter such companion imports are misdetected
+  // as their own missing skill and fail refresh with nothing to fix.
+  const hasSkillFile = (skillName: string): boolean => fs.existsSync(path.join(root, '.claude/skills', skillName, 'SKILL.md'));
+
   const channels = readImports(path.join(root, 'src/channels/index.ts'))
     .filter((name) => name !== 'cli')
-    .map((name) => ({ name, skillName: `add-${name}`, kind: 'channel' as const }));
+    .map((name) => ({ name, skillName: `add-${name}`, kind: 'channel' as const }))
+    .filter((skill) => hasSkillFile(skill.skillName));
   const providers = new Set([
     ...readImports(path.join(root, 'src/providers/index.ts')),
     ...readImports(path.join(root, 'container/agent-runner/src/providers/index.ts')),
@@ -102,11 +112,14 @@ export function detectInstalledSkills(root: string): InstalledSkill[] {
 
   return [
     ...channels,
-    ...[...providers].sort().map((name) => ({
-      name,
-      skillName: `add-${name}`,
-      kind: 'provider' as const,
-    })),
+    ...[...providers]
+      .sort()
+      .map((name) => ({
+        name,
+        skillName: `add-${name}`,
+        kind: 'provider' as const,
+      }))
+      .filter((skill) => hasSkillFile(skill.skillName)),
   ].sort((a, b) => a.skillName.localeCompare(b.skillName));
 }
 
