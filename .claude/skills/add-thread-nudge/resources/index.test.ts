@@ -73,7 +73,7 @@ vi.mock('./config.js', () => ({
   ROOT_LOOKUP_HISTORY_LIMIT: 60,
   MIN_SHARED_KEYWORDS: 2,
   MIN_KEYWORD_LENGTH: 4,
-  NUDGE_SNIPPET_MAX_CHARS: 120,
+  NUDGE_SNIPPET_MAX_CHARS: 80,
 }));
 
 const { checkSession, pollThreadNudge } = await import('./index.js');
