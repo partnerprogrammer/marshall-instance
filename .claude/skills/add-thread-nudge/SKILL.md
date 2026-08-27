@@ -119,6 +119,27 @@ systemctl --user restart $(systemd_unit)              # Linux
 # or: launchctl kickstart -k gui/$(id -u)/$(launchd_label)  # macOS
 ```
 
+### 5. Pin the channel reminder
+
+For every channel you allowlist, post + pin the reminder explaining
+Marshall's moderator role — the purpose, the reply-in-thread norm, and
+what a public nudge means. A public reply from a bot reads as random or
+intrusive unless the channel was told up front to expect it; the pinned
+reminder is what makes the behavior a known, opted-into norm rather than
+a surprise. The text is written for a client audience (no internal
+jargon), safe for shared channels.
+
+```bash
+pnpm exec tsx .claude/skills/add-thread-nudge/scripts/post-reminder.ts <slack-channel-id>
+```
+
+Idempotent — re-running skips channels that already have the pinned
+reminder, so it's safe to run on every rollout pass. Requires the
+`pins:write`/`pins:read` bot scopes (present on installed Marshall apps;
+not in the provisioning `BOT_SCOPES` list — if `pins.add` fails with
+`missing_scope`, grant the scopes and re-run; the message still posts
+either way).
+
 ## Tuning
 
 All thresholds live in `config.ts`: `POLL_INTERVAL_MS` (how often to scan —
