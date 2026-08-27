@@ -22,7 +22,15 @@ const outboundHistoryBySession: Record<string, Array<{ timestamp: string; kind: 
 const collectCandidates = vi.fn();
 const findRelatedThread = vi.fn();
 const writeOutboundDirect = vi.fn();
+const slackCall = vi.fn();
 
+vi.mock('../../channels/slack-lib.js', () => ({
+  botTokenKeyForInstance: (instanceKey: string) => `SLACK_BOT_TOKEN_TEST_${instanceKey}`,
+  slackCall,
+}));
+vi.mock('../../env.js', () => ({
+  readEnvFile: (keys: string[]) => Object.fromEntries(keys.map((k) => [k, 'test-bot-token'])),
+}));
 vi.mock('../../db/messaging-groups.js', () => ({
   getMessagingGroup: async (id: string) => messagingGroups[id],
   getMessagingGroupAgents: async (id: string) => wiringsByMg[id] ?? [],
@@ -61,6 +69,7 @@ vi.mock('./config.js', () => ({
   ROOT_LOOKUP_HISTORY_LIMIT: 60,
   MIN_SHARED_KEYWORDS: 2,
   MIN_KEYWORD_LENGTH: 4,
+  NUDGE_SNIPPET_MAX_CHARS: 120,
 }));
 
 const { checkSession, pollThreadNudge } = await import('./index.js');
@@ -104,12 +113,21 @@ beforeEach(() => {
   collectCandidates.mockReset();
   findRelatedThread.mockReset();
   writeOutboundDirect.mockReset();
+  slackCall.mockReset();
+  slackCall.mockResolvedValue({ permalink: 'https://pp.slack.com/archives/C1/p1710000000000000' });
 });
 
 describe('checkSession', () => {
   it('skips task-thread sessions', async () => {
     await checkSession('ag-1', MG, freshSession({ thread_id: 'system:tasks:t-1' }) as never);
     expect(writeOutboundDirect).not.toHaveBeenCalled();
+  });
+
+  it('skips sessions with no real thread_id (non-threaded/shared-mode session — nowhere to post a nudge)', async () => {
+    const session = freshSession({ thread_id: null });
+    setOpener(session.id, 'hello');
+    await checkSession('ag-1', MG, session as never);
+    expect(collectCandidates).not.toHaveBeenCalled();
   });
 
   it('skips sessions older than the nudge check window', async () => {
@@ -174,12 +192,12 @@ describe('checkSession', () => {
     expect(writeOutboundDirect).not.toHaveBeenCalled();
   });
 
-  it('posts a marked public reply in the session own thread when a related thread is found', async () => {
+  it('posts a marked public reply, with a real Slack permalink and a quote of the matched thread, when a related thread is found', async () => {
     const session = freshSession();
     setOpener(session.id, 'following up on the deploy');
     collectCandidates.mockResolvedValue([{ sessionId: 'sess-a', threadId: 'slack:C1:1.0' }]);
     findRelatedThread.mockReturnValue({
-      candidate: { sessionId: 'sess-a', threadId: 'slack:C1:1.0' },
+      candidate: { sessionId: 'sess-a', threadId: 'slack:C1:1.0', rootText: 'the deploy pipeline is stuck' },
       sharedKeywords: ['deploy'],
       reason: 'keywords',
     });
@@ -191,9 +209,38 @@ describe('checkSession', () => {
     expect(agentGroupId).toBe('ag-1');
     expect(sessionId).toBe(session.id);
     expect(msg).toMatchObject({ platformId: 'slack:C1', channelType: 'slack', threadId: session.thread_id });
+    expect(slackCall).toHaveBeenCalledWith(
+      'test-bot-token',
+      'chat.getPermalink',
+      { channel: 'C1', message_ts: '1.0' },
+      expect.any(String),
+    );
     const content = JSON.parse(msg.content) as { text: string; threadNudge: boolean };
     expect(content.threadNudge).toBe(true);
-    expect(content.text).toContain('slack:C1:1.0');
+    // Never the raw internal thread_id — a live-hit this regression test guards against.
+    expect(content.text).not.toContain('slack:C1:1.0');
+    expect(content.text).toContain('https://pp.slack.com/archives/C1/p1710000000000000');
+    expect(content.text).toContain('the deploy pipeline is stuck');
+  });
+
+  it('still posts a nudge (without a link) when the Slack permalink lookup fails', async () => {
+    slackCall.mockRejectedValue(new Error('boom'));
+    const session = freshSession();
+    setOpener(session.id, 'following up on the deploy');
+    collectCandidates.mockResolvedValue([{ sessionId: 'sess-a', threadId: 'slack:C1:1.0' }]);
+    findRelatedThread.mockReturnValue({
+      candidate: { sessionId: 'sess-a', threadId: 'slack:C1:1.0', rootText: 'the deploy pipeline is stuck' },
+      sharedKeywords: ['deploy'],
+      reason: 'keywords',
+    });
+
+    await checkSession('ag-1', MG, session as never);
+
+    expect(writeOutboundDirect).toHaveBeenCalledTimes(1);
+    const content = JSON.parse(writeOutboundDirect.mock.calls[0]![2].content) as { text: string };
+    expect(content.text).not.toContain('slack:C1:1.0');
+    expect(content.text).toContain('the related thread above');
+    expect(content.text).toContain('the deploy pipeline is stuck');
   });
 
   it('memoizes a no-match decision — a later call for the same session does no further work', async () => {
@@ -213,7 +260,7 @@ describe('checkSession', () => {
     setOpener(session.id, 'following up on the deploy');
     collectCandidates.mockResolvedValue([{ sessionId: 'sess-a', threadId: 'slack:C1:1.0' }]);
     findRelatedThread.mockReturnValue({
-      candidate: { sessionId: 'sess-a', threadId: 'slack:C1:1.0' },
+      candidate: { sessionId: 'sess-a', threadId: 'slack:C1:1.0', rootText: 'the deploy pipeline is stuck' },
       sharedKeywords: ['deploy'],
       reason: 'keywords',
     });
@@ -241,13 +288,35 @@ describe('pollThreadNudge', () => {
     expect(collectCandidates).not.toHaveBeenCalled();
   });
 
-  it('skips wirings not in per-thread session mode', async () => {
+  it('still checks sessions when the wiring is stored as session_mode=shared — the router can override to per-thread per-message, so the stored label is not authoritative', async () => {
+    // Regression: confirmed live on #marshall-test, whose wiring row stores
+    // session_mode='shared' (the column's default) while its actual
+    // sessions all carry real per-thread thread_ids, because
+    // deliverToAgent's resolveThreadPolicy overrides the effective mode per
+    // message. Filtering on the stored label here silently skipped the
+    // channel on every poll tick; the per-session thread_id check in
+    // checkSession is the only reliable gate now.
     messagingGroups['mg-internal'] = MG_BASE;
     wiringsByMg['mg-internal'] = [{ agent_group_id: 'ag-1', session_mode: 'shared' }];
     const session = freshSession();
     sessionsByAgentGroup['ag-1'] = [session];
     setOpener(session.id, 'hi');
+    collectCandidates.mockResolvedValue([]);
+
     await pollThreadNudge();
+
+    expect(collectCandidates).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips a session with no real thread_id even under an otherwise-checked wiring', async () => {
+    messagingGroups['mg-internal'] = MG_BASE;
+    wiringsByMg['mg-internal'] = [{ agent_group_id: 'ag-1', session_mode: 'shared' }];
+    const session = freshSession({ thread_id: null });
+    sessionsByAgentGroup['ag-1'] = [session];
+    setOpener(session.id, 'hi');
+
+    await pollThreadNudge();
+
     expect(collectCandidates).not.toHaveBeenCalled();
   });
 

@@ -24,19 +24,57 @@
  * outbound-history check in isNudged() is the correctness backstop that
  * keeps a restart from posting a duplicate.
  */
+import { botTokenKeyForInstance, slackCall } from '../../channels/slack-lib.js';
 import { getMessagingGroup, getMessagingGroupAgents } from '../../db/messaging-groups.js';
 import { getSessionsByAgentGroup, isTaskThread } from '../../db/sessions.js';
+import { readEnvFile } from '../../env.js';
 import { log } from '../../log.js';
 import { withExistingMailboxSession, writeOutboundDirect } from '../../session-manager.js';
 import type { MessagingGroup, Session } from '../../types.js';
+import type { CandidateThread } from './classify.js';
 import { collectCandidates, findRelatedThread, getThreadOpener } from './classify.js';
-import { NUDGE_CHECK_WINDOW_MINUTES, POLL_INTERVAL_MS, THREAD_NUDGE_MESSAGING_GROUPS } from './config.js';
+import {
+  NUDGE_CHECK_WINDOW_MINUTES,
+  NUDGE_SNIPPET_MAX_CHARS,
+  POLL_INTERVAL_MS,
+  THREAD_NUDGE_MESSAGING_GROUPS,
+} from './config.js';
 
-function nudgeText(threadId: string | null): string {
-  const pointer = threadId ? `the thread above (<${threadId}>)` : 'the related thread above';
+/**
+ * A real, clickable Slack permalink for a `slack:<channelId>:<ts>` thread
+ * id — never the raw internal thread_id string (that's an opaque host-side
+ * key, not a URL; posting it to Slack as-is is unusable — a live-hit that
+ * shipped once already). Returns null on any failure (non-Slack channel,
+ * missing bot token, API error): a nudge must still post without a link
+ * rather than not post at all.
+ */
+async function slackPermalink(mg: MessagingGroup, threadId: string | null): Promise<string | null> {
+  if (!threadId || mg.channel_type !== 'slack') return null;
+  const [scheme, channelId, ts] = threadId.split(':');
+  if (scheme !== 'slack' || !channelId || !ts) return null;
+
+  try {
+    const tokenKey = botTokenKeyForInstance(mg.instance ?? mg.channel_type);
+    const token = process.env[tokenKey] || readEnvFile([tokenKey])[tokenKey];
+    if (!token) return null;
+    const json = await slackCall(token, 'chat.getPermalink', { channel: channelId, message_ts: ts }, 'thread-nudge');
+    return typeof json.permalink === 'string' ? json.permalink : null;
+  } catch (err) {
+    log.debug('Thread nudge permalink lookup failed (posting without a link)', { threadId, err });
+    return null;
+  }
+}
+
+function snippet(text: string): string {
+  return text.length > NUDGE_SNIPPET_MAX_CHARS ? `${text.slice(0, NUDGE_SNIPPET_MAX_CHARS - 1)}…` : text;
+}
+
+async function nudgeText(mg: MessagingGroup, candidate: CandidateThread): Promise<string> {
+  const permalink = await slackPermalink(mg, candidate.threadId);
+  const pointer = permalink ? `the thread above (${permalink})` : 'the related thread above';
   return (
-    `This looks like it might belong in ${pointer} instead of starting fresh here — ` +
-    `want to continue the conversation there? (Marshall is trying out thread nudges — ` +
+    `This looks like it might belong in ${pointer} — "${snippet(candidate.rootText)}" — instead of starting fresh here. ` +
+    `Want to continue the conversation there? (Marshall is trying out thread nudges — ` +
     `react 👎 if this one's off.)`
   );
 }
@@ -74,7 +112,10 @@ function pruneDecided(): void {
 }
 
 export async function checkSession(agentGroupId: string, mg: MessagingGroup, session: Session): Promise<void> {
-  if (session.thread_id !== null && isTaskThread(session.thread_id)) return;
+  // A nudge is a reply posted INTO the session's own thread — a session
+  // with no real thread_id (a non-threaded/shared-mode session, or a task
+  // session) has nowhere to post it, so it can never be a nudge target.
+  if (session.thread_id === null || isTaskThread(session.thread_id)) return;
   if (decided.has(session.id)) return;
 
   const createdAt = Date.parse(session.created_at);
@@ -107,7 +148,7 @@ export async function checkSession(agentGroupId: string, mg: MessagingGroup, ses
     platformId: mg.platform_id,
     channelType: mg.channel_type,
     threadId: session.thread_id,
-    content: JSON.stringify({ text: nudgeText(match.candidate.threadId), threadNudge: true }),
+    content: JSON.stringify({ text: await nudgeText(mg, match.candidate), threadNudge: true }),
   });
   decided.set(session.id, createdAt);
   log.info('Thread nudge posted', { sessionId: session.id, messagingGroupId: mg.id, reason: match.reason });
@@ -121,10 +162,16 @@ export async function pollThreadNudge(): Promise<void> {
       const mg = await getMessagingGroup(messagingGroupId);
       if (!mg || mg.is_group !== 1) continue;
 
+      // Not filtered by wiring.session_mode: that's a stored label, not the
+      // router's actual per-event decision. router.ts's deliverToAgent
+      // computes an EFFECTIVE mode per message (resolveThreadPolicy against
+      // the channel's declared defaults + live adapter capability) that can
+      // be 'per-thread' in practice even while the wiring row says 'shared'
+      // — confirmed live on #marshall-test, whose wiring is stored as
+      // 'shared' but whose sessions all carry real per-thread thread_ids.
+      // checkSession's own thread_id check is the reliable filter.
       const wirings = await getMessagingGroupAgents(messagingGroupId);
       for (const wiring of wirings) {
-        if (wiring.session_mode !== 'per-thread') continue;
-
         const sessions = (await getSessionsByAgentGroup(wiring.agent_group_id)).filter(
           (s) => s.status === 'active' && s.messaging_group_id === messagingGroupId,
         );

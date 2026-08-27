@@ -11,7 +11,10 @@ for every un-threaded message, so the reply lands disconnected from the
 conversation it's actually part of. This skill adds a module that, when a
 brand-new top-level message looks like a continuation of another
 recently-active thread in the same channel, posts a public reply in the new
-message's own thread pointing at the related one.
+message's own thread pointing at the related one — a real, clickable Slack
+permalink (via `chat.getPermalink`) plus a short quote of that thread's
+opening message, not the raw internal thread_id (that's an opaque host-side
+key, not a URL — a live-hit posting it as plain text shipped once already).
 
 Public by design: a private/DM nudge was tried and rejected first — it
 removes the social-accountability effect and risks becoming a DM people

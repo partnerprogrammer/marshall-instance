@@ -83,3 +83,8 @@ export const MIN_SHARED_KEYWORDS = 2;
 
 /** Tokens shorter than this are never "significant" (too common/low-signal). */
 export const MIN_KEYWORD_LENGTH = 4;
+
+/** How much of the matched thread's opening message to quote in the nudge
+ *  text, so a reader can tell at a glance whether the pointer is worth
+ *  following without leaving the channel. */
+export const NUDGE_SNIPPET_MAX_CHARS = 120;
