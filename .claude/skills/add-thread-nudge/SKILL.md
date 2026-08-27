@@ -18,16 +18,32 @@ removes the social-accountability effect and risks becoming a DM people
 learn to ignore. The dismissal flow (a person marking a nudge wrong) is a
 separate concern, not covered by this skill.
 
+## How it watches
+
+Poll-based, on its own timer (`POLL_INTERVAL_MS`, `config.ts`) — not an event
+hook. The router's `registerSessionCreatedHook()` only fires for sessions it
+actually *engages* (`wake=true`), which for a Slack group channel in
+`mention-sticky` mode means "someone mentioned the bot." A stray top-level
+reply between humans that never mentions the bot still creates a session
+(confirmed live: `wake=false`, hook never fires) — exactly the case this
+skill exists to catch. So it polls instead: no container wake involved, just
+host-side SQLite reads, matching `host-sweep.ts`'s own plain `setInterval`
+pattern. That means the interval is cheap to run often; it isn't bounded by
+cron's one-minute floor the way `ncl tasks` would be.
+
 ## How it decides
 
 No semantic index or embeddings — a recency-bounded heuristic, matching the
 posture of the built-in `cross-session-context` module:
 
-1. Collect recent sibling sessions in the same channel (active, within
-   `CANDIDATE_MAX_AGE_MINUTES`), each contributing its opening message.
-2. A new message matches a candidate when it @-mentions the candidate's
-   opener, or shares at least `MIN_SHARED_KEYWORDS` significant keywords
-   with it.
+1. Each poll tick, for every active per-thread session in an allowlisted
+   channel younger than `NUDGE_CHECK_WINDOW_MINUTES` and not already nudged
+   (checked against persisted outbound history, so a host restart never
+   double-posts), collect recent sibling sessions in the same channel
+   (active, within `CANDIDATE_MAX_AGE_MINUTES`), each contributing its
+   opening message.
+2. A message matches a candidate when it @-mentions the candidate's opener,
+   or shares at least `MIN_SHARED_KEYWORDS` significant keywords with it.
 3. No match → no-op. This is intentionally conservative; tune the
    thresholds in `config.ts` against real traffic before loosening them.
 
@@ -57,9 +73,11 @@ ship with the skill and run against the composed project.
 - `classify.test.ts` — behavior: candidate gathering (recency, same channel,
   excludes task threads) and relatedness matching (mention vs. keyword
   overlap, and the null case).
-- `index.test.ts` — wiring: gating (allowlist, group-only, per-thread
-  sessions only, unparseable text) and that a match actually posts via
-  `writeOutboundDirect` addressed at the new message's own thread.
+- `index.test.ts` — poll gating (missing/DM messaging group, non-per-thread
+  wiring, active-session filtering, one bad session doesn't block the rest)
+  and per-session checks (freshness window, dedup against persisted outbound
+  history, and that a match actually posts via `writeOutboundDirect`
+  addressed at the session's own thread).
 
 ### 2. Register the module
 
@@ -67,10 +85,10 @@ ship with the skill and run against the composed project.
 import './thread-nudge/index.js';
 ```
 
-That one line is this skill's only reach into core — `index.ts` self-registers
-on the router's `registerSessionCreatedHook()` at import time (the same hook
-`docs/`-documented channel modules use for platform-specific session-created
-work; see `router.ts`). No edits to `router.ts` or `cross-session-context/`.
+That one line is this skill's only reach into core. `index.ts` starts its own
+`setInterval` poll at import time when the allowlist (step 3) is non-empty —
+no core files touched, no router hook, no `ncl tasks` (which would wake a
+container every tick).
 
 ### 3. Scope the rollout
 
@@ -96,8 +114,11 @@ systemctl --user restart $(systemd_unit)              # Linux
 
 ## Tuning
 
-All thresholds live in `config.ts`: `CANDIDATE_LIMIT` (how many sibling
-sessions to consider), `CANDIDATE_MAX_AGE_MINUTES` (how recent a sibling
-thread must be to count), `MIN_SHARED_KEYWORDS` / `MIN_KEYWORD_LENGTH`
-(keyword-overlap match bar). Start conservative and loosen only after
-watching real false-positive/negative behavior in an internal channel.
+All thresholds live in `config.ts`: `POLL_INTERVAL_MS` (how often to scan —
+cheap, no container wake), `NUDGE_CHECK_WINDOW_MINUTES` (how long a session
+stays eligible for a nudge before it's considered too stale to bother),
+`CANDIDATE_LIMIT` (how many sibling sessions to consider), `CANDIDATE_MAX_AGE_MINUTES`
+(how recent a sibling thread must be to count), `MIN_SHARED_KEYWORDS` /
+`MIN_KEYWORD_LENGTH` (keyword-overlap match bar). Start conservative and
+loosen only after watching real false-positive/negative behavior in an
+internal channel.
