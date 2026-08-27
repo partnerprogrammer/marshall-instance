@@ -24,7 +24,7 @@
  * outbound-history check in isNudged() is the correctness backstop that
  * keeps a restart from posting a duplicate.
  */
-import { botTokenKeyForInstance, slackCall } from '../../channels/slack-lib.js';
+import { botTokenKeyForInstance } from '../../channels/slack-lib.js';
 import { getMessagingGroup, getMessagingGroupAgents } from '../../db/messaging-groups.js';
 import { getSessionsByAgentGroup, isTaskThread } from '../../db/sessions.js';
 import { readEnvFile } from '../../env.js';
@@ -47,6 +47,13 @@ import {
  * shipped once already). Returns null on any failure (non-Slack channel,
  * missing bot token, API error): a nudge must still post without a link
  * rather than not post at all.
+ *
+ * Deliberately not routed through slack-lib.ts's slackCall: that helper
+ * POSTs a JSON body, which every OTHER Web API method this codebase calls
+ * accepts — but chat.getPermalink does not. Confirmed live: POST+JSON
+ * returns `invalid_arguments`; the method only recognizes GET query-string
+ * params. This does its own minimal GET rather than changing slackCall's
+ * shared POST behavior for every other caller.
  */
 async function slackPermalink(mg: MessagingGroup, threadId: string | null): Promise<string | null> {
   if (!threadId || mg.channel_type !== 'slack') return null;
@@ -57,8 +64,15 @@ async function slackPermalink(mg: MessagingGroup, threadId: string | null): Prom
     const tokenKey = botTokenKeyForInstance(mg.instance ?? mg.channel_type);
     const token = process.env[tokenKey] || readEnvFile([tokenKey])[tokenKey];
     if (!token) return null;
-    const json = await slackCall(token, 'chat.getPermalink', { channel: channelId, message_ts: ts }, 'thread-nudge');
-    return typeof json.permalink === 'string' ? json.permalink : null;
+
+    const params = new URLSearchParams({ channel: channelId, message_ts: ts });
+    const res = await fetch(`https://slack.com/api/chat.getPermalink?${params.toString()}`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    const json = (await res.json()) as { ok?: boolean; permalink?: string };
+    return json.ok === true && typeof json.permalink === 'string' ? json.permalink : null;
   } catch (err) {
     log.debug('Thread nudge permalink lookup failed (posting without a link)', { threadId, err });
     return null;

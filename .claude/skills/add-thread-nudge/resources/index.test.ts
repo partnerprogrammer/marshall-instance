@@ -22,15 +22,19 @@ const outboundHistoryBySession: Record<string, Array<{ timestamp: string; kind: 
 const collectCandidates = vi.fn();
 const findRelatedThread = vi.fn();
 const writeOutboundDirect = vi.fn();
-const slackCall = vi.fn();
 
 vi.mock('../../channels/slack-lib.js', () => ({
   botTokenKeyForInstance: (instanceKey: string) => `SLACK_BOT_TOKEN_TEST_${instanceKey}`,
-  slackCall,
 }));
 vi.mock('../../env.js', () => ({
   readEnvFile: (keys: string[]) => Object.fromEntries(keys.map((k) => [k, 'test-bot-token'])),
 }));
+// chat.getPermalink is a GET call (see index.ts's own doc comment on
+// slackPermalink for why it isn't routed through slack-lib.ts's slackCall),
+// so it's exercised here via a mocked global fetch rather than a mocked
+// slack-lib export.
+const fetchMock = vi.fn();
+vi.stubGlobal('fetch', fetchMock);
 vi.mock('../../db/messaging-groups.js', () => ({
   getMessagingGroup: async (id: string) => messagingGroups[id],
   getMessagingGroupAgents: async (id: string) => wiringsByMg[id] ?? [],
@@ -113,8 +117,10 @@ beforeEach(() => {
   collectCandidates.mockReset();
   findRelatedThread.mockReset();
   writeOutboundDirect.mockReset();
-  slackCall.mockReset();
-  slackCall.mockResolvedValue({ permalink: 'https://pp.slack.com/archives/C1/p1710000000000000' });
+  fetchMock.mockReset();
+  fetchMock.mockResolvedValue({
+    json: async () => ({ ok: true, permalink: 'https://pp.slack.com/archives/C1/p1710000000000000' }),
+  });
 });
 
 describe('checkSession', () => {
@@ -209,12 +215,13 @@ describe('checkSession', () => {
     expect(agentGroupId).toBe('ag-1');
     expect(sessionId).toBe(session.id);
     expect(msg).toMatchObject({ platformId: 'slack:C1', channelType: 'slack', threadId: session.thread_id });
-    expect(slackCall).toHaveBeenCalledWith(
-      'test-bot-token',
-      'chat.getPermalink',
-      { channel: 'C1', message_ts: '1.0' },
-      expect.any(String),
-    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [calledUrl, calledOpts] = fetchMock.mock.calls[0]!;
+    const url = new URL(calledUrl as string);
+    expect(url.origin + url.pathname).toBe('https://slack.com/api/chat.getPermalink');
+    expect(url.searchParams.get('channel')).toBe('C1');
+    expect(url.searchParams.get('message_ts')).toBe('1.0');
+    expect(calledOpts).toMatchObject({ method: 'GET', headers: { Authorization: 'Bearer test-bot-token' } });
     const content = JSON.parse(msg.content) as { text: string; threadNudge: boolean };
     expect(content.threadNudge).toBe(true);
     // Never the raw internal thread_id — a live-hit this regression test guards against.
@@ -224,7 +231,7 @@ describe('checkSession', () => {
   });
 
   it('still posts a nudge (without a link) when the Slack permalink lookup fails', async () => {
-    slackCall.mockRejectedValue(new Error('boom'));
+    fetchMock.mockRejectedValue(new Error('boom'));
     const session = freshSession();
     setOpener(session.id, 'following up on the deploy');
     collectCandidates.mockResolvedValue([{ sessionId: 'sess-a', threadId: 'slack:C1:1.0' }]);
@@ -241,6 +248,29 @@ describe('checkSession', () => {
     expect(content.text).not.toContain('slack:C1:1.0');
     expect(content.text).toContain('the related thread above');
     expect(content.text).toContain('the deploy pipeline is stuck');
+  });
+
+  it('still posts a nudge (without a link) when Slack responds ok:false — the exact live failure this regression test guards against', async () => {
+    // Confirmed live: chat.getPermalink returned HTTP 200 with
+    // {ok:false, error:'invalid_arguments'} the first time this shipped,
+    // because it was called through slackCall's POST+JSON convention
+    // instead of the GET query-string form the method actually requires.
+    fetchMock.mockResolvedValue({ json: async () => ({ ok: false, error: 'invalid_arguments' }) });
+    const session = freshSession();
+    setOpener(session.id, 'following up on the deploy');
+    collectCandidates.mockResolvedValue([{ sessionId: 'sess-a', threadId: 'slack:C1:1.0' }]);
+    findRelatedThread.mockReturnValue({
+      candidate: { sessionId: 'sess-a', threadId: 'slack:C1:1.0', rootText: 'the deploy pipeline is stuck' },
+      sharedKeywords: ['deploy'],
+      reason: 'keywords',
+    });
+
+    await checkSession('ag-1', MG, session as never);
+
+    expect(writeOutboundDirect).toHaveBeenCalledTimes(1);
+    const content = JSON.parse(writeOutboundDirect.mock.calls[0]![2].content) as { text: string };
+    expect(content.text).not.toContain('slack:C1:1.0');
+    expect(content.text).toContain('the related thread above');
   });
 
   it('memoizes a no-match decision — a later call for the same session does no further work', async () => {
