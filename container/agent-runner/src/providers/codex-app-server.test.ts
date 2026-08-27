@@ -7,7 +7,9 @@ import {
   type AppServer,
   CODEX_APP_SERVER_ARGS,
   attachCodexAutoApproval,
+  buildCodexConfigPlan,
   buildCodexProcessEnv,
+  renderCodexConfigToml,
   startOrResumeCodexThread,
   tomlBasicString,
   writeCodexConfigToml,
@@ -31,6 +33,64 @@ afterEach(() => {
 });
 
 describe('Codex config TOML', () => {
+  it('builds every declared configuration capability before rendering', () => {
+    const mcpServers = { nanoclaw: { command: 'bun', args: ['run', 'server.ts'] } };
+    const plan = buildCodexConfigPlan(mcpServers, { model: 'gpt-5', effort: 'medium', fastMode: true });
+
+    expect(plan).toEqual({
+      executionPolicy: {
+        sandboxMode: 'danger-full-access',
+        approvalPolicy: 'never',
+        projectDocumentMaxBytes: 32768,
+      },
+      inference: { model: 'gpt-5', effort: 'medium', fastMode: true },
+      memory: { memories: false, useMemories: false, generateMemories: false },
+      mcpServers,
+    });
+    expect(renderCodexConfigToml(plan)).toContain('[mcp_servers.nanoclaw]');
+  });
+
+  it('renders the exact bytes, pinning line order and the trailing newline', () => {
+    const content = renderCodexConfigToml(
+      buildCodexConfigPlan(
+        {
+          nanoclaw: { command: 'bun', args: ['run', '/app/src/mcp-tools/index.ts'], env: { FOO: 'bar' } },
+          docs: { type: 'http', url: 'https://mcp.example.com/mcp', headers: { 'X-Api-Version': '2024-06' } },
+        },
+        { model: 'gpt-5', effort: 'medium', fastMode: true },
+      ),
+    );
+    expect(content).toBe(
+      [
+        'sandbox_mode = "danger-full-access"',
+        'approval_policy = "never"',
+        'project_doc_max_bytes = 32768',
+        'model = "gpt-5"',
+        'model_reasoning_effort = "medium"',
+        'service_tier = "fast"',
+        '',
+        '[features]',
+        'memories = false',
+        '',
+        '[memories]',
+        'use_memories = false',
+        'generate_memories = false',
+        '',
+        '[mcp_servers.nanoclaw]',
+        'command = "bun"',
+        'args = ["run", "/app/src/mcp-tools/index.ts"]',
+        '[mcp_servers.nanoclaw.env]',
+        'FOO = "bar"',
+        '',
+        '[mcp_servers.docs]',
+        'url = "https://mcp.example.com/mcp"',
+        '[mcp_servers.docs.http_headers]',
+        '"X-Api-Version" = "2024-06"',
+        '',
+      ].join('\n'),
+    );
+  });
+
   it('escapes basic strings', () => {
     expect(tomlBasicString('a "quoted" \\\\ value')).toBe('"a \\"quoted\\" \\\\\\\\ value"');
   });
@@ -43,7 +103,7 @@ describe('Codex config TOML', () => {
     expect(() => tomlBasicString('bad\nvalue')).toThrow(/newline/);
   });
 
-  it('hardcodes danger-full-access + never and writes model, effort, and MCP servers', () => {
+  it('hardcodes danger-full-access + never and writes model, effort, fast mode, and MCP servers', () => {
     tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-home-'));
     process.env.HOME = tmpHome;
 
@@ -61,7 +121,7 @@ describe('Codex config TOML', () => {
         },
       },
       MEMORY_SESSION_HOOK,
-      { model: 'gpt-5', effort: 'medium' },
+      { model: 'gpt-5', effort: 'medium', fastMode: true },
     );
 
     const content = fs.readFileSync(path.join(tmpHome, '.codex', 'config.toml'), 'utf-8');
@@ -70,6 +130,7 @@ describe('Codex config TOML', () => {
     expect(content).toContain('project_doc_max_bytes = 32768');
     expect(content).toContain('model = "gpt-5"');
     expect(content).toContain('model_reasoning_effort = "medium"');
+    expect(content).toContain('service_tier = "fast"');
     expect(content).toContain('[features]\nmemories = false');
     expect(content).toContain('[memories]\nuse_memories = false\ngenerate_memories = false');
     expect(content).not.toContain('[sandbox_workspace_write]');
@@ -203,6 +264,38 @@ describe('Codex config TOML', () => {
         hooks: [{ type: 'command', command: 'bun /app/src/memory/hook.ts', timeout: 10 }],
       },
     ]);
+  });
+
+  it('replaces config.toml before malformed hooks.json fails', () => {
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-home-'));
+    process.env.HOME = tmpHome;
+    const codexDir = path.join(tmpHome, '.codex');
+    const configPath = path.join(codexDir, 'config.toml');
+    const hooksPath = path.join(codexDir, 'hooks.json');
+    fs.mkdirSync(codexDir, { recursive: true });
+    fs.writeFileSync(configPath, 'stale config');
+    fs.writeFileSync(hooksPath, '{');
+
+    expect(() => writeCodexConfigToml({}, MEMORY_SESSION_HOOK, { model: 'gpt-5' })).toThrow();
+    expect(fs.readFileSync(configPath, 'utf-8')).toContain('model = "gpt-5"');
+    expect(fs.readFileSync(configPath, 'utf-8')).not.toContain('stale config');
+    expect(fs.readFileSync(hooksPath, 'utf-8')).toBe('{');
+  });
+
+  it('replaces config.toml before an existing empty hooks.json fails', () => {
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-home-'));
+    process.env.HOME = tmpHome;
+    const codexDir = path.join(tmpHome, '.codex');
+    const configPath = path.join(codexDir, 'config.toml');
+    const hooksPath = path.join(codexDir, 'hooks.json');
+    fs.mkdirSync(codexDir, { recursive: true });
+    fs.writeFileSync(configPath, 'stale config');
+    fs.writeFileSync(hooksPath, '');
+
+    expect(() => writeCodexConfigToml({}, MEMORY_SESSION_HOOK, { model: 'gpt-5' })).toThrow();
+    expect(fs.readFileSync(configPath, 'utf-8')).toContain('model = "gpt-5"');
+    expect(fs.readFileSync(configPath, 'utf-8')).not.toContain('stale config');
+    expect(fs.readFileSync(hooksPath, 'utf-8')).toBe('');
   });
 });
 

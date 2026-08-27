@@ -7,25 +7,31 @@
  * before `createProvider()` is called.
  */
 import type { AgentProvider, ProviderOptions } from './types.js';
+import type { ProviderRuntimeContract } from '../provider-contracts/registry.js';
 
 export type ProviderFactory = (options: ProviderOptions) => AgentProvider;
 
-const registry = new Map<string, ProviderFactory>();
+export interface ProviderRegistration {
+  create: ProviderFactory;
+  contract?: ProviderRuntimeContract;
+}
 
-export function registerProvider(name: string, factory: ProviderFactory): void {
+const registry = new Map<string, ProviderRegistration>();
+
+export function registerProvider(name: string, registration: ProviderFactory | ProviderRegistration): void {
   if (registry.has(name)) {
     throw new Error(`Provider already registered: ${name}`);
   }
-  registry.set(name, factory);
+  registry.set(name, typeof registration === 'function' ? { create: registration } : registration);
 }
 
 export function getProviderFactory(name: string): ProviderFactory {
-  const factory = registry.get(name);
-  if (!factory) {
+  const registration = registry.get(name);
+  if (!registration) {
     const known = [...registry.keys()].join(', ') || '(none)';
     throw new Error(`Unknown provider: ${name}. Registered: ${known}`);
   }
-  return factory;
+  return registration.create;
 }
 
 export function listProviderNames(): string[] {

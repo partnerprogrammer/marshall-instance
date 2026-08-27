@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 
+import { codexRuntimeContract } from '../provider-contracts/codex.js';
 import { registerProvider } from './provider-registry.js';
 import type {
   AgentProvider,
@@ -11,7 +12,7 @@ import type {
   ProviderOptions,
   QueryInput,
 } from './types.js';
-import { archiveProviderExchange } from './exchange-archive.js';
+import { archiveProviderExchange as archiveProviderExchangeLegacy } from './exchange-archive.js';
 import {
   type AppServer,
   type CodexMemorySessionHook,
@@ -22,6 +23,7 @@ import {
   initializeCodexAppServer,
   interruptCodexTurn,
   killCodexAppServer,
+  normalizeCodexEffort,
   spawnCodexAppServer,
   startCodexTurn,
   startOrResumeCodexThread,
@@ -30,7 +32,6 @@ import {
 } from './codex-app-server.js';
 
 const TURN_TIMEOUT_MS = 10 * 60 * 1000;
-const SUPPORTED_EFFORTS = new Set<CodexReasoningEffort>(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 
 export interface CodexRuntimeDeps {
   writeCodexConfigToml: typeof writeCodexConfigToml;
@@ -64,23 +65,12 @@ function classifyError(message: string): string | undefined {
   return undefined;
 }
 
-function normalizeEffort(effort: string | undefined): CodexReasoningEffort | undefined {
-  const normalized = effort?.trim().toLowerCase();
-  if (!normalized) return undefined;
-  if (!SUPPORTED_EFFORTS.has(normalized as CodexReasoningEffort)) {
-    throw new Error(`Unsupported Codex reasoning effort: ${effort}`);
-  }
-  return normalized as CodexReasoningEffort;
-}
-
 export class CodexProvider implements AgentProvider {
-  readonly supportsNativeSlashCommands = false;
   // The app-server keeps history server-side; there is no on-disk transcript,
-  // so the provider persists each exchange itself into `conversations/`
-  // (see exchange-archive.ts). The poll-loop reports exchanges through this
-  // hook and does nothing else — archiving is payload code, not runner code.
+  // so each exchange is persisted into `conversations/`. New core replaces
+  // this fallback with its declared archive executor at the factory boundary.
   onExchangeComplete(exchange: ProviderExchange): void {
-    archiveProviderExchange({
+    archiveProviderExchangeLegacy({
       provider: 'codex',
       prompt: exchange.prompt,
       result: exchange.result,
@@ -92,6 +82,7 @@ export class CodexProvider implements AgentProvider {
   private readonly mcpServers: Record<string, McpServerConfig>;
   private readonly model?: string;
   private readonly effort?: CodexReasoningEffort;
+  private readonly fastMode?: boolean;
   private readonly runtime: CodexRuntimeDeps;
   private memorySessionHook?: CodexMemorySessionHook;
 
@@ -99,7 +90,8 @@ export class CodexProvider implements AgentProvider {
     this.mcpServers = options.mcpServers ?? {};
     this.model = options.model;
     this.runtime = runtime;
-    this.effort = normalizeEffort(options.effort);
+    this.effort = normalizeCodexEffort(options.effort);
+    this.fastMode = options.speed === 'fast' || undefined;
   }
 
   registerMemorySessionHook(hook: CodexMemorySessionHook): void {
@@ -143,9 +135,12 @@ export class CodexProvider implements AgentProvider {
     const self = this;
 
     async function* gen(): AsyncGenerator<ProviderEvent> {
+      // Legacy direct writer for provider branches loaded by cores that do
+      // not yet expose provider lifecycle callbacks.
       self.runtime.writeCodexConfigToml(self.mcpServers, memorySessionHook, {
         model: self.model,
         effort: self.effort,
+        fastMode: self.fastMode,
       });
       const server = self.runtime.spawnCodexAppServer();
       activeServer = server;
@@ -424,4 +419,4 @@ function listGeneratedImages(threadId: string): Set<string> {
   }
 }
 
-registerProvider('codex', (opts) => new CodexProvider(opts));
+registerProvider('codex', { create: (opts) => new CodexProvider(opts), contract: codexRuntimeContract });

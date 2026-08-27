@@ -10,6 +10,7 @@ import { createOpencodeClient, type FilePartInput, type OpencodeClient } from '@
 // separately so the session/event client above is untouched.
 import { createOpencodeClient as createOpencodeQuestionClient } from '@opencode-ai/sdk/v2';
 
+import { OPENCODE_PERMISSION_POLICY, opencodeRuntimeContract } from '../provider-contracts/opencode.js';
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 import { mcpServersToOpenCodeConfig } from './mcp-to-opencode.js';
@@ -383,24 +384,7 @@ export function buildOpenCodeConfig(options: ProviderOptions): Record<string, un
     // "allow everything" behavior.
     // A category OpenCode adds after this list was written is absent from it,
     // and so resolves to OpenCode's own default rather than to `allow`.
-    permission: {
-      read: 'allow',
-      edit: 'allow',
-      glob: 'allow',
-      grep: 'allow',
-      list: 'allow',
-      bash: 'allow',
-      task: 'allow',
-      external_directory: 'allow',
-      todowrite: 'allow',
-      question: 'deny',
-      webfetch: 'allow',
-      websearch: 'allow',
-      codesearch: 'allow',
-      lsp: 'allow',
-      doom_loop: 'allow',
-      skill: 'allow',
-    },
+    permission: OPENCODE_PERMISSION_POLICY,
     autoupdate: false,
     snapshot: false,
     provider: providerOptions,
@@ -1178,4 +1162,4 @@ export class OpenCodeProvider implements AgentProvider {
   }
 }
 
-registerProvider('opencode', (opts) => new OpenCodeProvider(opts));
+registerProvider('opencode', { create: (opts) => new OpenCodeProvider(opts), contract: opencodeRuntimeContract });
