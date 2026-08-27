@@ -1,30 +1,6 @@
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
 
 export interface AgentProvider {
-  /**
-   * True if the provider's underlying SDK handles slash commands natively and
-   * wants them passed through as raw text. When false, the poll-loop formats
-   * slash commands like any other chat message.
-   */
-  readonly supportsNativeSlashCommands: boolean;
-
-  /**
-   * Optional capability: true when the provider surfaces EVERY assistant text
-   * segment as a streamed `text` event before the turn's `result` — so the
-   * result text is always a repeat of a segment that already streamed
-   * (empirically: the SDK result is exactly the last streamed segment). When
-   * declared, mid-turn streaming becomes the SINGLE content door: the
-   * poll-loop delivers complete <message> blocks at parse time from the
-   * streamed events (assembling blocks split across segments), and the
-   * final-result handler never delivers content — error results are
-   * surfaced, and a turn that delivered nothing while its result still
-   * carries content gets the wrap-nudge so the retry streams through the
-   * mid-turn door. Providers that omit this (or set false) keep the single
-   * result-door delivery path: text events are delivery-inert and blocks in
-   * the final result text are delivered from there.
-   */
-  readonly emitsMidTurnText?: boolean;
-
   /** Register shared memory through the provider's native session-start mechanism. */
   registerMemorySessionHook(hook: MemorySessionHookRegistration): void;
 
@@ -35,7 +11,9 @@ export interface AgentProvider {
    * markdown into the agent's `conversations/` dir); providers that persist
    * and archive their own transcript (e.g. the Claude Agent SDK's `.jsonl`)
    * omit it. Best-effort: the loop catches and logs anything it throws. The
-   * implementation lives with the provider, never in the runner.
+   * Contractless providers implement this directly. For a declared
+   * core-owned archive, the factory replaces it with the core executor while
+   * the provider implementation remains an old-core compatibility fallback.
    */
   onExchangeComplete?(exchange: ProviderExchange): void;
 
@@ -55,7 +33,9 @@ export interface AgentProvider {
    * the continuation and start a fresh session (the provider archives any
    * recoverable summary first); return null to keep resuming.
    *
-   * Guards the cold-resume failure mode: a long-lived hub session accumulates
+   * For declared core-owned rotation, the factory replaces the provider
+   * fallback with the core executor. This guards the cold-resume failure mode:
+   * a long-lived hub session accumulates
    * days of history — including base64 image blocks the agent Read — and the
    * SDK reloads the whole .jsonl on every resume. Past a threshold the first
    * turn alone can exceed the host's idle ceiling, so the container is killed
@@ -173,7 +153,7 @@ export type ProviderEvent =
    * The SDK's final `result` carries only the LAST assistant text, so a
    * complete <message to="..."> block composed before a trailing tool call
    * never reaches the result event. For providers declaring
-   * `emitsMidTurnText`, the poll-loop scans these segments for closed
+   * `textDelivery: 'mid-turn-complete'`, the poll-loop scans these segments for closed
    * message blocks and delivers them as they are emitted (chat runs only,
    * with cross-segment assembly of split blocks); the final result never
    * delivers content — repeats are inert there, and an undelivered turn

@@ -21,10 +21,6 @@ continuation token to resume, the working directory, and system context to injec
 
 ```typescript
 interface AgentProvider {
-  /** True if the SDK handles slash commands natively and wants them passed
-   *  through raw. When false, the poll-loop formats them like any chat message. */
-  readonly supportsNativeSlashCommands: boolean;
-
   /** Register shared memory through the provider's native session-start mechanism. */
   registerMemorySessionHook(hook: MemorySessionHookRegistration): void;
 
@@ -127,7 +123,6 @@ only reads the per-turn `QueryInput`.
 
 ```typescript
 class ClaudeProvider implements AgentProvider {
-  readonly supportsNativeSlashCommands = true;
   // ...constructor stores options.mcpServers, .env, .additionalDirectories,
   //    .model, .effort, .assistantName...
 

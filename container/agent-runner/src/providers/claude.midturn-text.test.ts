@@ -20,6 +20,7 @@ mock.module('@anthropic-ai/claude-agent-sdk', () => ({
 }));
 
 const { ClaudeProvider } = await import('./claude.js');
+const { claudeRuntimeContract } = await import('../provider-contracts/claude.js');
 const { MEMORY_SESSION_HOOK } = await import('../memory/session-hook.js');
 
 let tmp: string;
@@ -38,8 +39,8 @@ afterEach(() => {
 });
 
 describe('assistant text block surfacing', () => {
-  it('declares the emitsMidTurnText capability the poll-loop keys one-door delivery on', () => {
-    expect(new ClaudeProvider({}).emitsMidTurnText).toBe(true);
+  it('declares mid-turn delivery in the runtime contract', () => {
+    expect(claudeRuntimeContract.textDelivery).toBe('mid-turn-complete');
   });
 
   it('yields one text event per assistant message with text, before the result', async () => {

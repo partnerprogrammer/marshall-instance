@@ -7,14 +7,6 @@ import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryIn
  * Supports push() — queued messages produce additional results.
  */
 export class MockProvider implements AgentProvider {
-  readonly supportsNativeSlashCommands = false;
-  /**
-   * Mirrors ClaudeProvider: turnEvents() emits every configured text segment
-   * before the turn's result, so the mock exercises the same one-door
-   * mid-turn delivery path as the real SDK.
-   */
-  readonly emitsMidTurnText = true;
-
   private responseFactory: (prompt: string) => string;
   private textFactory: ((prompt: string) => string[]) | undefined;
 
@@ -48,8 +40,7 @@ export class MockProvider implements AgentProvider {
     // Mid-turn text segments (if configured) followed by the turn's result —
     // mirrors the SDK's assistant-message → result ordering. The result text
     // itself streams as the LAST text event first: the real SDK's result only
-    // repeats the final assistant text, which already streamed — that is the
-    // emitsMidTurnText contract this mock declares.
+    // repeats the final assistant text, which already streamed.
     function* turnEvents(prompt: string): Generator<ProviderEvent> {
       for (const text of textFactory?.(prompt) ?? []) {
         yield { type: 'text', text };
