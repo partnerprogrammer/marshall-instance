@@ -31,8 +31,8 @@ Check whether the payload is already wired (a prior apply, or a trunk that still
 
 - `src/providers/codex.ts` and `src/providers/codex-agents-md.ts`
 - `container/agent-runner/src/providers/codex.ts` and `codex-app-server.ts`
-- `setup/providers/codex.ts` and all three `provider-contracts/codex.ts` declarations
-- `import './codex.js';` in the three provider barrels and three contract barrels
+- `setup/providers/codex.ts` plus the host and runtime `provider-contracts/codex.ts` declarations
+- `import './codex.js';` in the three provider barrels and the host contract barrel
 - an `@openai/codex` entry in `container/cli-tools.json`
 
 ### 1. Fetch and copy the payload
