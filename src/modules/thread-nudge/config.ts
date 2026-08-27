@@ -6,6 +6,22 @@
  * (recency + keyword/mention overlap), not a semantic index — same posture
  * as the rest of cross-session context. Tune these during internal testing
  * before ever widening MESSAGING_GROUPS to client-facing channels.
+ *
+ * Poll-based, not event-based: registerSessionCreatedHook only fires for
+ * sessions the router actually engages (wake=true), which in Slack group
+ * channels means "someone mentioned the bot." A stray top-level reply
+ * between humans that never mentions the bot creates a session (wake=false)
+ * but never reaches that hook — confirmed live on CUP-4868's own test
+ * traffic. This module instead polls on its own timer, matching
+ * host-sweep.ts's plain setInterval pattern — no container wake, so the
+ * interval is cheap to run often.
+ *
+ * The poll interval and the nudge-eligibility window are independent knobs:
+ * index.ts memoizes each session's decision after its first real check, so
+ * a shorter POLL_INTERVAL_MS only shrinks how soon a *new* session gets
+ * looked at — it does not re-scan sessions already decided. Widening
+ * NUDGE_CHECK_WINDOW_MINUTES is a UX call (how late a reply can still
+ * usefully be nudged), not a cost one.
  */
 import { readEnvFile } from '../../env.js';
 
@@ -27,6 +43,22 @@ export const THREAD_NUDGE_MESSAGING_GROUPS = new Set(
     .map((s) => s.trim())
     .filter(Boolean),
 );
+
+/** How often to scan allowlisted channels for un-decided top-level sessions.
+ *  No container wake involved (pure host-side SQLite reads) and each
+ *  session is only ever really checked once (see the module doc comment in
+ *  index.ts), so this can run faster than a cron-scheduled agent task ever
+ *  could without multiplying work — 45s is a UX choice (how soon a stray
+ *  reply gets caught), not a cost tradeoff. */
+export const POLL_INTERVAL_MS = 45_000;
+
+/** A session older than this is no longer worth nudging — "you should have
+ *  replied in the thread" stops being useful advice once the moment has
+ *  passed. Independent of CANDIDATE_MAX_AGE_MINUTES (how far back we look
+ *  for candidates a message might belong to) and independent of
+ *  POLL_INTERVAL_MS (see above) — this is purely how generous the window
+ *  is, not how much repeat work a shorter poll causes. */
+export const NUDGE_CHECK_WINDOW_MINUTES = 30;
 
 /** How many recent sibling sessions (same messaging group) to consider as candidates. */
 export const CANDIDATE_LIMIT = 12;
