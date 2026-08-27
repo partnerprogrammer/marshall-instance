@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# `gh` shim for MarshallBuilder (CUP-4838), same pattern as skills/infisical-shim.
+#
+# `gh`'s own API calls don't go through git's credential.helper (that's a
+# git-protocol-only mechanism) — gh reads GH_TOKEN from the environment
+# instead. This shim fetches a fresh GitHub App installation token from
+# pp-hub and exports it before handing off to the real binary, so every gh
+# invocation (pr create, pr view, ...) is transparently authenticated. Same
+# "fetch fresh, never cache" model as git-credential-marshall — see that
+# script's header for the full rationale.
+#
+# Must be invoked by its full path (or GH_BIN pointed at it) — this file is
+# itself named "gh" so REAL_GH below is an explicit path, never a PATH
+# lookup, or this would recurse into itself.
+set -euo pipefail
+
+REAL_GH="${MARSHALL_REAL_GH_BIN:-/workspace/extra/gh/bin/gh}"
+HUB_BASE_URL="${MARSHALL_HUB_BASE_URL:-https://hub.partnerprogrammer.com}"
+
+response=$(curl -sf -X POST "${HUB_BASE_URL%/}/api/marshall/github-token") || {
+  echo "gh shim: failed to reach pp-hub's token-mint endpoint" >&2
+  exit 1
+}
+
+token=$(printf '%s' "$response" | grep -o '"token":"[^"]*"' | head -1 | sed 's/"token":"//;s/"$//')
+if [ -z "$token" ]; then
+  echo "gh shim: pp-hub response had no token field: $response" >&2
+  exit 1
+fi
+
+export GH_TOKEN="$token"
+exec "$REAL_GH" "$@"

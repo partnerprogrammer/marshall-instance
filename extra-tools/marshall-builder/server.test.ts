@@ -3,6 +3,7 @@ import {
   bounceToPm,
   branchNameForTask,
   formatNeedsInputNote,
+  gitConfigEntries,
   handleRequest,
   planHandoff,
   pmUserIdFor,
@@ -99,13 +100,13 @@ describe("resolveCatalogProject", () => {
 
   test("resolves every breez-brain project (full catalog access, not just breez-hub)", () => {
     for (const key of ["breez-website", "breez-hubspot-app", "breez-ai-agent", "logistics-mobile-app", "knowledge-base-faq", "knowledge-base-articles"]) {
-      expect(resolveCatalogProject(key).git_url).toBe("git@github.com:partnerprogrammer/breez-brain.git");
+      expect(resolveCatalogProject(key).git_url).toBe("https://github.com/partnerprogrammer/breez-brain.git");
     }
   });
 
-  test("resolves pp-stack as its own standalone repo", () => {
+  test("resolves pp-stack as its own standalone repo (pp-marshall App access approved 2026-08-26, CUP-4838)", () => {
     const project = resolveCatalogProject("pp-stack");
-    expect(project.git_url).toBe("git@github.com:partnerprogrammer/pp-stack.git");
+    expect(project.git_url).toBe("https://github.com/partnerprogrammer/pp-stack.git");
     expect(project.subpath).toBe(".");
   });
 });
@@ -133,6 +134,27 @@ describe("bounceToPm", () => {
     );
     expect(result).toContain("bounced to PM");
     expect(result).toContain(String(PM)); // FALLBACK_PM_USER_ID default, since creator is Marshall
+  });
+});
+
+describe("gitConfigEntries", () => {
+  test("always configures credential helper and commit identity (first live build needed both set by hand — CUP-4918)", () => {
+    const keys = gitConfigEntries().map(([k]) => k);
+    expect(keys).toContain("credential.helper");
+    expect(keys).toContain("user.name");
+    expect(keys).toContain("user.email");
+    expect(keys).not.toContain("http.sslCAInfo");
+  });
+
+  test("points git at the gateway CA when SSL_CERT_FILE is present (git ignores that env var natively)", () => {
+    const entries = gitConfigEntries({ sslCertFile: "/tmp/onecli-combined-ca.pem" });
+    expect(entries).toContainEqual(["http.sslCAInfo", "/tmp/onecli-combined-ca.pem"]);
+  });
+
+  test("commits as the pp-marshall App's bot user — the noreply email is what makes GitHub attribute name/avatar/[bot] badge", () => {
+    const entries = gitConfigEntries();
+    expect(entries).toContainEqual(["user.name", "pp-marshall[bot]"]);
+    expect(entries).toContainEqual(["user.email", "277097953+pp-marshall[bot]@users.noreply.github.com"]);
   });
 });
 

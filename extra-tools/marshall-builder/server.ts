@@ -156,9 +156,18 @@ function ensureClone(gitUrl: string, cacheDir: string): void {
   if (existsSync(cacheDir)) {
     execFileSync("git", ["fetch", "origin"], { cwd: cacheDir, stdio: "inherit" });
     execFileSync("git", ["reset", "--hard", "origin/main"], { cwd: cacheDir, stdio: "inherit" });
-    return;
+  } else {
+    execFileSync("git", ["clone", gitUrl, cacheDir], { stdio: "inherit" });
   }
-  execFileSync("git", ["clone", gitUrl, cacheDir], { stdio: "inherit" });
+  // Repo-LOCAL identity, stomped on every run — local config outranks the
+  // global default ensureGitSetup writes, and clones persist across container
+  // respawns in the session dir. Bit us on CUP-4925: the agent had hand-set
+  // "MarshallBuilder <marshall-builder@...>" locally during the first build,
+  // the clone survived, and every later commit silently kept the stale
+  // unlinked identity despite the new global. Worktrees share the parent
+  // repo's config, so setting it here covers them all.
+  execFileSync("git", ["config", "user.name", GIT_AUTHOR_NAME], { cwd: cacheDir, stdio: "inherit" });
+  execFileSync("git", ["config", "user.email", GIT_AUTHOR_EMAIL], { cwd: cacheDir, stdio: "inherit" });
 }
 
 function createTaskWorktree(cacheDir: string, worktreeDir: string, branch: string): void {
@@ -192,8 +201,56 @@ export function resolveCatalogProject(projectKey: string): RepoMapProject {
   return project;
 }
 
+// Global git setup (CUP-4838). Everything here is idempotent — safe to
+// repeat on every prepare_workspace call — and everything here exists
+// because its absence broke (or would silently degrade) a real build:
+//
+// - credential.helper: fallback auth layer. The PRIMARY github.com auth is
+//   the OneCLI gateway's github-app connection injecting the installation
+//   token in transit (confirmed live 2026-08-26); the helper only matters
+//   if that connection is ever removed/broken, minting its own token from
+//   pp-hub. See assets/bin/git-credential-marshall.
+// - http.sslCAInfo: git does NOT read SSL_CERT_FILE (that's an OpenSSL-tool
+//   convention curl/node honor, not git's) — without this, every git HTTPS
+//   call through the gateway's MITM proxy fails TLS verification. Bit the
+//   first live build (CUP-4918); the agent had to discover and set it by
+//   hand mid-run.
+// - user.name/email: containers spawn with no git identity, so the first
+//   `git commit` errors out. Same first live build, same manual fix.
+//   MarshallBuilder commits under its own name — auditable, and consistent
+//   with PP's no-Claude-attribution convention.
+//
+// All overridable via env for testability/config — never actually invoked
+// by the current test suite (prepareWorkspace tests reject before this);
+// gitConfigEntries is the pure, tested part.
+const GIT_CREDENTIAL_HELPER = process.env.GIT_CREDENTIAL_HELPER ?? "/workspace/extra/marshall-builder/bin/git-credential-marshall";
+// GitHub attributes commits to the pp-marshall App (name, avatar, [bot]
+// badge) by matching the committer email against the App's bot-user noreply
+// address — <bot-user-id>+<slug>[bot]@users.noreply.github.com. An arbitrary
+// email renders as an unlinked gray identity (bit PR #111, the first live
+// build). 277097953 is pp-marshall[bot]'s user id (GET /users/pp-marshall[bot]).
+const GIT_AUTHOR_NAME = process.env.MARSHALL_GIT_AUTHOR_NAME ?? "pp-marshall[bot]";
+const GIT_AUTHOR_EMAIL = process.env.MARSHALL_GIT_AUTHOR_EMAIL ?? "277097953+pp-marshall[bot]@users.noreply.github.com";
+
+export function gitConfigEntries(env: { sslCertFile?: string } = {}): Array<[string, string]> {
+  const entries: Array<[string, string]> = [
+    ["credential.helper", GIT_CREDENTIAL_HELPER],
+    ["user.name", GIT_AUTHOR_NAME],
+    ["user.email", GIT_AUTHOR_EMAIL],
+  ];
+  if (env.sslCertFile) entries.push(["http.sslCAInfo", env.sslCertFile]);
+  return entries;
+}
+
+function ensureGitSetup(): void {
+  for (const [key, value] of gitConfigEntries({ sslCertFile: process.env.SSL_CERT_FILE })) {
+    execFileSync("git", ["config", "--global", key, value], { stdio: "inherit" });
+  }
+}
+
 export async function prepareWorkspace(args: { task_id: string; project_key: string }, f: FetchImpl): Promise<string> {
   const project = resolveCatalogProject(args.project_key);
+  ensureGitSetup();
   const task = await getTask(args.task_id, f);
   const taskRef = displayTaskId(task);
   const branch = branchNameForTask(taskRef);
@@ -228,9 +285,15 @@ interface PrInfo {
   state: string; // OPEN | MERGED | CLOSED
 }
 
+// Container path is /workspace/extra/gh/bin/gh, not bare "gh" on PATH (the
+// mount exists but PATH isn't extended for it — same reason Marshall's own
+// persona tells him to use the full path). Overridable so local dev/tests
+// keep using whatever "gh" resolves to on PATH.
+const GH_BIN = process.env.GH_BIN ?? "gh";
+
 async function findPrForBranch(worktreeDir: string, branch: string): Promise<PrInfo | null> {
   try {
-    const { stdout } = await execFileAsync("gh", ["pr", "view", branch, "--json", "url,state"], { cwd: worktreeDir });
+    const { stdout } = await execFileAsync(GH_BIN, ["pr", "view", branch, "--json", "url,state"], { cwd: worktreeDir });
     const { url, state } = JSON.parse(stdout) as { url?: string; state?: string };
     return typeof url === "string" && typeof state === "string" ? { url, state } : null;
   } catch {
@@ -259,6 +322,31 @@ export function planHandoff(task: ClickUpTaskLite, prUrl: string, pmUserId: numb
   return Object.keys(body).length > 0 ? body : null;
 }
 
+// Terminal half of the confirmed-build durability loop (CUP-4838). Marshall's
+// confirm_build wrote a task_run row into pp-hub's marshall_jobs at dispatch;
+// marking it done here (on BOTH terminal outcomes — handoff and bounce) is
+// what lets the queue sweep treat a still-queued row past its build budget as
+// the real signal: "dispatched but never finished". Best-effort, never
+// throws — losing the marker must not fail a handoff that already succeeded
+// (same principle as record_work_time). No Authorization header on purpose:
+// the OneCLI gateway injects PPHUB_MARSHALL_API_TOKEN in transit.
+const HUB_BASE_URL = process.env.MARSHALL_HUB_BASE_URL ?? "https://hub.partnerprogrammer.com";
+
+async function completeBuildJob(task: { id: string; custom_id?: string | null }, f: FetchImpl): Promise<string> {
+  try {
+    const res = await f(`${HUB_BASE_URL.replace(/\/$/, "")}/api/marshall/jobs/complete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ taskId: task.id, customId: task.custom_id ?? undefined }),
+    });
+    if (!res.ok) return `backstop job not closed (pp-hub ${res.status}) — harmless unless the queue sweep alerts later`;
+    const { completed } = (await res.json()) as { completed?: number };
+    return completed ? `backstop job closed` : `no pending backstop job (ad-hoc dispatch or already closed)`;
+  } catch (err) {
+    return `backstop job not closed (${err instanceof Error ? err.message : String(err)}) — harmless unless the queue sweep alerts later`;
+  }
+}
+
 /**
  * Verify the session's terminal obligations and enforce whatever it
  * skipped. Throws when no PR exists (or only a CLOSED one) — a "successful"
@@ -276,11 +364,12 @@ export async function finalizeHandoff(args: { task_id: string; worktree_dir: str
   }
   const task = await getTask(args.task_id, f); // re-fetch: a human may have already moved it
   const body = planHandoff(task, pr.url, pmUserIdFor(task));
+  const jobNote = await completeBuildJob(task, f);
   if (body) {
     await updateTask(task.id, body, f);
-    return `${displayTaskId(task)}: enforced handoff (${Object.keys(body).join(", ")}) — PR ${pr.url}`;
+    return `${displayTaskId(task)}: enforced handoff (${Object.keys(body).join(", ")}) — PR ${pr.url} (${jobNote})`;
   }
-  return `${displayTaskId(task)}: handoff already complete — PR ${pr.url}`;
+  return `${displayTaskId(task)}: handoff already complete — PR ${pr.url} (${jobNote})`;
 }
 
 // ---------------------------------------------------------------------------
@@ -357,7 +446,8 @@ export async function bounceToPm(args: { task_id: string; revert_status: string;
     },
     f
   );
-  return `${displayTaskId(task)}: bounced to PM (user ${pmId}), status reverted to "${args.revert_status}"`;
+  const jobNote = await completeBuildJob(task, f);
+  return `${displayTaskId(task)}: bounced to PM (user ${pmId}), status reverted to "${args.revert_status}" (${jobNote})`;
 }
 
 // ---------------------------------------------------------------------------
