@@ -55,7 +55,7 @@ import {
  * params. This does its own minimal GET rather than changing slackCall's
  * shared POST behavior for every other caller.
  */
-async function slackPermalink(mg: MessagingGroup, threadId: string | null): Promise<string | null> {
+export async function slackPermalink(mg: MessagingGroup, threadId: string | null): Promise<string | null> {
   if (!threadId || mg.channel_type !== 'slack') return null;
   const [scheme, channelId, ts] = threadId.split(':');
   if (scheme !== 'slack' || !channelId || !ts) return null;
