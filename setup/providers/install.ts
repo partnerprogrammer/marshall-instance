@@ -30,6 +30,10 @@
 import { execSync } from 'node:child_process';
 
 import { applySkill, type ApplyResult } from '../../scripts/skill-apply.js';
+import {
+  verifyProviderContracts,
+  type ProviderContractVerification,
+} from '../../scripts/provider-contract-verifier.js';
 
 /** Commands the directive engine emits that the surrounding setup flow owns. */
 function isFlowOwnedCommand(cmd: string): boolean {
@@ -39,6 +43,7 @@ function isFlowOwnedCommand(cmd: string): boolean {
     /container\/build\.sh/.test(cmd) ||
     /\bvitest\b/.test(cmd) ||
     /\bbun\s+test\b/.test(cmd) ||
+    /provider-contract-verifier/.test(cmd) ||
     // The skill's auth step re-invokes `--step provider-auth` — running it from
     // inside the install would recurse. The flow runs runAuth itself.
     /provider-auth/.test(cmd)
@@ -51,6 +56,7 @@ export interface ProviderInstallResult {
   changed: boolean;
   /** Non-deterministic leftovers — non-empty means the install did not fully apply. */
   blockers: string[];
+  verification: ProviderContractVerification;
 }
 
 export async function applyProviderSkill(skillDir: string, projectRoot: string): Promise<ProviderInstallResult> {
@@ -74,9 +80,13 @@ export async function applyProviderSkill(skillDir: string, projectRoot: string):
   });
 
   const blockers = [...result.agentTasks.map((t) => t.reason), ...result.deferred];
+  const verification =
+    blockers.length === 0 ? await verifyProviderContracts(projectRoot) : { status: 'skipped' as const, checks: [] };
+  if (verification.status === 'failed') blockers.push(verification.error ?? 'Provider contract verification failed');
   return {
     apply: result,
     changed: result.applied.length > 0,
     blockers,
+    verification,
   };
 }
