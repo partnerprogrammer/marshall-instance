@@ -135,12 +135,15 @@ export async function collectCandidates(
   session: Session,
   messagingGroupId: string,
 ): Promise<CandidateThread[]> {
+  // thread_id === null means a non-threaded/shared-mode session — there's
+  // no navigable thread to point a nudge at, so it can't be a candidate.
   const siblings = (await getSessionsByAgentGroup(agentGroupId)).filter(
     (s) =>
       s.id !== session.id &&
       s.status === 'active' &&
       s.messaging_group_id === messagingGroupId &&
-      !(s.thread_id !== null && isTaskThread(s.thread_id)),
+      s.thread_id !== null &&
+      !isTaskThread(s.thread_id),
   );
   if (siblings.length === 0) return [];
 

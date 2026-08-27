@@ -36,12 +36,16 @@ cron's one-minute floor the way `ncl tasks` would be.
 No semantic index or embeddings — a recency-bounded heuristic, matching the
 posture of the built-in `cross-session-context` module:
 
-1. Each poll tick, for every active per-thread session in an allowlisted
-   channel younger than `NUDGE_CHECK_WINDOW_MINUTES` and not already nudged
-   (checked against persisted outbound history, so a host restart never
-   double-posts), collect recent sibling sessions in the same channel
-   (active, within `CANDIDATE_MAX_AGE_MINUTES`), each contributing its
-   opening message.
+1. Each poll tick, for every active session with a real thread_id in an
+   allowlisted channel younger than `NUDGE_CHECK_WINDOW_MINUTES` and not
+   already nudged (checked against persisted outbound history, so a host
+   restart never double-posts), collect recent sibling sessions in the same
+   channel (active, real thread_id, within `CANDIDATE_MAX_AGE_MINUTES`),
+   each contributing its opening message. "Real thread_id" is checked
+   per-session, not via the wiring's stored `session_mode` — that column is
+   a label the router can override per-message (a wiring stored as `shared`
+   can still produce per-thread sessions in practice), so it doesn't
+   reliably say what actually happened.
 2. A message matches a candidate when it @-mentions the candidate's opener,
    or shares at least `MIN_SHARED_KEYWORDS` significant keywords with it.
 3. No match → no-op. This is intentionally conservative; tune the
@@ -73,9 +77,9 @@ ship with the skill and run against the composed project.
 - `classify.test.ts` — behavior: candidate gathering (recency, same channel,
   excludes task threads) and relatedness matching (mention vs. keyword
   overlap, and the null case).
-- `index.test.ts` — poll gating (missing/DM messaging group, non-per-thread
-  wiring, active-session filtering, one bad session doesn't block the rest)
-  and per-session checks (freshness window, dedup against persisted outbound
+- `index.test.ts` — poll gating (missing/DM messaging group, active-session
+  filtering, one bad session doesn't block the rest) and per-session checks
+  (no real thread_id, freshness window, dedup against persisted outbound
   history, and that a match actually posts via `writeOutboundDirect`
   addressed at the session's own thread).
 

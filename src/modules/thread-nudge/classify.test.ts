@@ -84,6 +84,19 @@ describe('collectCandidates', () => {
     expect(candidates).toEqual([]);
   });
 
+  it('excludes a sibling with no real thread_id (non-threaded/shared-mode session)', async () => {
+    // There's no navigable thread to point a nudge at, so it can't be a
+    // candidate even if its opening message would otherwise match well.
+    siblingSessions = [{ id: 'sess-shared', status: 'active', messaging_group_id: 'mg-1', thread_id: null }];
+    historyBySession = {
+      'sess-shared': rootHistory(new Date(Date.now() - 5 * 60_000).toISOString(), 'deploy pipeline is stuck'),
+    };
+
+    const candidates = await collectCandidates('ag-1', NEW_SESSION, 'mg-1');
+
+    expect(candidates).toEqual([]);
+  });
+
   it('excludes siblings whose root message is older than the recency window', async () => {
     siblingSessions = [{ id: 'sess-stale', status: 'active', messaging_group_id: 'mg-1', thread_id: 'slack:C1:1.0' }];
     historyBySession = {

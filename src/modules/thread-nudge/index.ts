@@ -74,7 +74,10 @@ function pruneDecided(): void {
 }
 
 export async function checkSession(agentGroupId: string, mg: MessagingGroup, session: Session): Promise<void> {
-  if (session.thread_id !== null && isTaskThread(session.thread_id)) return;
+  // A nudge is a reply posted INTO the session's own thread — a session
+  // with no real thread_id (a non-threaded/shared-mode session, or a task
+  // session) has nowhere to post it, so it can never be a nudge target.
+  if (session.thread_id === null || isTaskThread(session.thread_id)) return;
   if (decided.has(session.id)) return;
 
   const createdAt = Date.parse(session.created_at);
@@ -121,10 +124,16 @@ export async function pollThreadNudge(): Promise<void> {
       const mg = await getMessagingGroup(messagingGroupId);
       if (!mg || mg.is_group !== 1) continue;
 
+      // Not filtered by wiring.session_mode: that's a stored label, not the
+      // router's actual per-event decision. router.ts's deliverToAgent
+      // computes an EFFECTIVE mode per message (resolveThreadPolicy against
+      // the channel's declared defaults + live adapter capability) that can
+      // be 'per-thread' in practice even while the wiring row says 'shared'
+      // — confirmed live on #marshall-test, whose wiring is stored as
+      // 'shared' but whose sessions all carry real per-thread thread_ids.
+      // checkSession's own thread_id check is the reliable filter.
       const wirings = await getMessagingGroupAgents(messagingGroupId);
       for (const wiring of wirings) {
-        if (wiring.session_mode !== 'per-thread') continue;
-
         const sessions = (await getSessionsByAgentGroup(wiring.agent_group_id)).filter(
           (s) => s.status === 'active' && s.messaging_group_id === messagingGroupId,
         );

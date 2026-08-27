@@ -112,6 +112,13 @@ describe('checkSession', () => {
     expect(writeOutboundDirect).not.toHaveBeenCalled();
   });
 
+  it('skips sessions with no real thread_id (non-threaded/shared-mode session — nowhere to post a nudge)', async () => {
+    const session = freshSession({ thread_id: null });
+    setOpener(session.id, 'hello');
+    await checkSession('ag-1', MG, session as never);
+    expect(collectCandidates).not.toHaveBeenCalled();
+  });
+
   it('skips sessions older than the nudge check window', async () => {
     const session = freshSession({ created_at: new Date(Date.now() - 60 * 60_000).toISOString() });
     setOpener(session.id, 'hello');
@@ -241,13 +248,35 @@ describe('pollThreadNudge', () => {
     expect(collectCandidates).not.toHaveBeenCalled();
   });
 
-  it('skips wirings not in per-thread session mode', async () => {
+  it('still checks sessions when the wiring is stored as session_mode=shared — the router can override to per-thread per-message, so the stored label is not authoritative', async () => {
+    // Regression: confirmed live on #marshall-test, whose wiring row stores
+    // session_mode='shared' (the column's default) while its actual
+    // sessions all carry real per-thread thread_ids, because
+    // deliverToAgent's resolveThreadPolicy overrides the effective mode per
+    // message. Filtering on the stored label here silently skipped the
+    // channel on every poll tick; the per-session thread_id check in
+    // checkSession is the only reliable gate now.
     messagingGroups['mg-internal'] = MG_BASE;
     wiringsByMg['mg-internal'] = [{ agent_group_id: 'ag-1', session_mode: 'shared' }];
     const session = freshSession();
     sessionsByAgentGroup['ag-1'] = [session];
     setOpener(session.id, 'hi');
+    collectCandidates.mockResolvedValue([]);
+
     await pollThreadNudge();
+
+    expect(collectCandidates).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips a session with no real thread_id even under an otherwise-checked wiring', async () => {
+    messagingGroups['mg-internal'] = MG_BASE;
+    wiringsByMg['mg-internal'] = [{ agent_group_id: 'ag-1', session_mode: 'shared' }];
+    const session = freshSession({ thread_id: null });
+    sessionsByAgentGroup['ag-1'] = [session];
+    setOpener(session.id, 'hi');
+
+    await pollThreadNudge();
+
     expect(collectCandidates).not.toHaveBeenCalled();
   });
 
