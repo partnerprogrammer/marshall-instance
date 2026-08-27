@@ -21,11 +21,11 @@ afterEach(() => {
 });
 
 describe('buildOpenCodeConfig provider transport', () => {
-  it('anthropic provider gets no provider options', () => {
+  it('anthropic provider gets the gateway placeholder key', () => {
     process.env.OPENCODE_PROVIDER = 'anthropic';
     delete process.env.ANTHROPIC_BASE_URL;
     const config = buildOpenCodeConfig({});
-    expect(config.provider).toEqual({});
+    expect(config.provider).toEqual({ anthropic: { options: { apiKey: 'placeholder' } } });
   });
 
   it('custom base URL pins the Chat Completions transport', () => {
