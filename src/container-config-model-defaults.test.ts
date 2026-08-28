@@ -10,6 +10,9 @@
  * graph with the environment it is testing rather than mocking the constants.
  * That exercises the real resolution chain.
  */
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createAgentGroup } from './db/agent-groups.js';
@@ -30,19 +33,24 @@ const GROUP: AgentGroup = {
 async function withEnv(
   env: Record<string, string | undefined>,
   row: ContainerConfigRow,
-): Promise<{ model?: string; fastMode?: boolean }> {
+): Promise<{ model?: string; speed?: 'standard' | 'fast' }> {
   const saved: Record<string, string | undefined> = {};
+  const savedCwd = process.cwd();
+  const emptyProject = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-model-defaults-'));
   for (const [k, v] of Object.entries(env)) {
     saved[k] = process.env[k];
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
   }
   try {
+    process.chdir(emptyProject);
     vi.resetModules();
     const { configFromDb } = await import('./container-config.js');
     const cfg = configFromDb(row, GROUP);
-    return { model: cfg.model, fastMode: cfg.fastMode };
+    return { model: cfg.model, speed: cfg.speed };
   } finally {
+    process.chdir(savedCwd);
+    fs.rmSync(emptyProject, { recursive: true, force: true });
     for (const [k, v] of Object.entries(saved)) {
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
@@ -70,7 +78,7 @@ describe('install-wide model defaults', () => {
   it('ships neither field when neither variable is set', async () => {
     const cfg = await withEnv(CLEAR, row);
     expect(cfg.model).toBeUndefined();
-    expect(cfg.fastMode).toBeUndefined();
+    expect(cfg.speed).toBeUndefined();
   });
 
   it('fills the model for a group that has none', async () => {
@@ -92,13 +100,25 @@ describe('install-wide model defaults', () => {
 
   it("enables fast mode on '1' and 'true', case-insensitively", async () => {
     for (const value of ['1', 'true', 'TRUE', 'True']) {
-      expect((await withEnv({ ...CLEAR, NANOCLAW_FAST_MODE: value }, row)).fastMode).toBe(true);
+      expect((await withEnv({ ...CLEAR, NANOCLAW_FAST_MODE: value }, row)).speed).toBe('fast');
     }
   });
 
   it('leaves fast mode off for anything else — a typo must not start charging', async () => {
     for (const value of ['0', 'false', 'yes', 'on', 'ture', '']) {
-      expect((await withEnv({ ...CLEAR, NANOCLAW_FAST_MODE: value }, row)).fastMode).toBeUndefined();
+      expect((await withEnv({ ...CLEAR, NANOCLAW_FAST_MODE: value }, row)).speed).toBeUndefined();
     }
+  });
+
+  it("keeps the group's fast speed when the install default is off", async () => {
+    await updateContainerConfigScalars(GROUP.id, { speed: 'fast' });
+    const withSpeed = (await getContainerConfig(GROUP.id))!;
+    expect((await withEnv({ ...CLEAR, NANOCLAW_FAST_MODE: 'false' }, withSpeed)).speed).toBe('fast');
+  });
+
+  it("lets the group's standard speed override the install-wide fast default", async () => {
+    await updateContainerConfigScalars(GROUP.id, { speed: 'standard' });
+    const withSpeed = (await getContainerConfig(GROUP.id))!;
+    expect((await withEnv({ ...CLEAR, NANOCLAW_FAST_MODE: 'true' }, withSpeed)).speed).toBe('standard');
   });
 });

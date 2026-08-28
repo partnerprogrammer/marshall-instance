@@ -60,6 +60,7 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
     provider: row.provider,
     model: row.model,
     effort: row.effort,
+    speed: row.speed,
     image_tag: row.image_tag,
     assistant_name: row.assistant_name,
     max_messages_per_prompt: row.max_messages_per_prompt,
@@ -372,7 +373,8 @@ registerResource({
       access: 'approval',
       description:
         'Update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
-        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
+        'Use --id <group-id> and any of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
+        '--speed is "standard", "fast", or "" to follow the install default (Claude: fast mode; Codex: fast service tier). ' +
         '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart).',
       handler: async (args) => {
         const id = args.id as string;
@@ -386,6 +388,7 @@ registerResource({
             | 'provider'
             | 'model'
             | 'effort'
+            | 'speed'
             | 'image_tag'
             | 'assistant_name'
             | 'max_messages_per_prompt'
@@ -398,6 +401,13 @@ registerResource({
         if (timezone !== undefined) updates.timezone = timezone;
         if (args.model !== undefined) updates.model = args.model as string;
         if (args.effort !== undefined) updates.effort = args.effort as string;
+        if (args.speed !== undefined) {
+          const speed = args.speed as string;
+          if (speed !== '' && speed !== 'standard' && speed !== 'fast') {
+            throw new Error('--speed must be "standard", "fast", or "" (clear)');
+          }
+          updates.speed = speed || null;
+        }
         if (args.image_tag !== undefined) updates.image_tag = args.image_tag as string;
         if (args.assistant_name !== undefined) updates.assistant_name = args.assistant_name as string;
         if (args.max_messages_per_prompt !== undefined)
@@ -412,7 +422,7 @@ registerResource({
 
         if (Object.keys(updates).length === 0) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone',
           );
         }
 

@@ -194,7 +194,7 @@ export class ClaudeProvider implements AgentProvider {
     this.mcp = resolveClaudeMcpServers(options.mcpServers ?? {}, process.env);
     this.additionalDirectories = options.additionalDirectories;
     this.inference = resolveClaudeInference(
-      { model: options.model, effort: options.effort, fastMode: options.fastMode },
+      { model: options.model, effort: options.effort, speed: options.speed },
       process.env,
     );
     this.executionPolicy = resolveClaudeExecutionPolicy(undefined, process.env);
@@ -247,7 +247,7 @@ export class ClaudeProvider implements AgentProvider {
         // Only sent when enabled, so an install that never turns it on passes
         // exactly the options it always did. `fastMode` is a Settings member
         // rather than a query option, which is why it rides `settings`.
-        ...(this.inference.fastMode ? { settings: { fastMode: true } } : {}),
+        ...(this.inference.settings ? { settings: this.inference.settings } : {}),
         mcpServers: this.mcp.mcpServers,
         hooks: {
           PreToolUse: [{ hooks: [preToolUseHook] }],

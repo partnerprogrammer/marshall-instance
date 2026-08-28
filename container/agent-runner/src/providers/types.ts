@@ -1,5 +1,7 @@
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
 
+export type ProviderSpeed = 'standard' | 'fast';
+
 export interface AgentProvider {
   /** Register shared memory through the provider's native session-start mechanism. */
   registerMemorySessionHook(hook: MemorySessionHookRegistration): void;
@@ -74,10 +76,10 @@ export interface ProviderOptions {
    */
   effort?: string;
   /**
-   * API fast serving tier: faster output at a higher per-token price. Passed
-   * through to the underlying SDK. If omitted, the SDK default is used.
+   * Speed tier (`standard` or `fast`), mapped to the provider's native knob
+   * (`fast` → Claude's `fastMode`, Codex's `service_tier`).
    */
-  fastMode?: boolean;
+  speed?: ProviderSpeed;
 }
 
 export interface QueryInput {

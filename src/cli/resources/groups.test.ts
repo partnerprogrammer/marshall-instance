@@ -267,7 +267,7 @@ describe('groups CLI delete cascades dependent rows (#2525)', () => {
   });
 });
 
-describe('groups config add-mount / remove-mount (host-only)', () => {
+describe('groups config (host-only)', () => {
   beforeEach(async () => {
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
     fs.mkdirSync(TEST_DIR, { recursive: true });
@@ -324,5 +324,27 @@ describe('groups config add-mount / remove-mount (host-only)', () => {
     );
     expect(accepted.ok).toBe(true);
     expect((await getContainerConfig(GID))!.provider).toBe('claude');
+  });
+
+  it('accepts standard and fast speed, but rejects undeclared tiers', async () => {
+    const GID = 'ag-speed';
+    await createAgentGroup({ id: GID, name: 's', folder: 's', agent_provider: null, created_at: now() });
+    await ensureContainerConfig(GID);
+
+    for (const speed of ['standard', 'fast']) {
+      const response = await dispatch(
+        { id: speed, command: 'groups-config-update', args: { id: GID, speed } },
+        { caller: 'host' },
+      );
+      expect(response.ok).toBe(true);
+      expect((await getContainerConfig(GID))!.speed).toBe(speed);
+    }
+
+    const rejected = await dispatch(
+      { id: 'turbo', command: 'groups-config-update', args: { id: GID, speed: 'turbo' } },
+      { caller: 'host' },
+    );
+    expect(rejected.ok).toBe(false);
+    expect((await getContainerConfig(GID))!.speed).toBe('fast');
   });
 });

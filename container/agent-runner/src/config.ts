@@ -7,7 +7,7 @@
  */
 import fs from 'fs';
 
-import type { McpServerConfig } from './providers/types.js';
+import type { McpServerConfig, ProviderSpeed } from './providers/types.js';
 
 const CONFIG_PATH = '/workspace/agent/container.json';
 
@@ -20,8 +20,7 @@ export interface RunnerConfig {
   mcpServers: Record<string, McpServerConfig>;
   model?: string;
   effort?: string;
-  /** API fast serving tier (host-configured; see the host's container-config). */
-  fastMode?: boolean;
+  speed?: ProviderSpeed;
 }
 
 const DEFAULT_MAX_MESSAGES = 10;
@@ -51,7 +50,7 @@ export function loadConfig(): RunnerConfig {
     mcpServers: (raw.mcpServers as RunnerConfig['mcpServers']) || {},
     model: (raw.model as string) || undefined,
     effort: (raw.effort as string) || undefined,
-    fastMode: raw.fastMode === true || undefined,
+    speed: raw.speed === 'standard' || raw.speed === 'fast' ? raw.speed : undefined,
   };
 
   return _config;

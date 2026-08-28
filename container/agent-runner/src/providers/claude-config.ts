@@ -7,7 +7,7 @@
  */
 
 import { shimCwd } from './cwd-shim.js';
-import type { McpServerConfig } from './types.js';
+import type { McpServerConfig, ProviderSpeed } from './types.js';
 
 // Deferred SDK builtins that either sidestep nanoclaw's own scheduling or
 // don't fit our async message-passing model (they're designed for Claude
@@ -99,12 +99,20 @@ export function resolveClaudeExecutionPolicy(
   };
 }
 
-/** Model, reasoning effort, and fast mode pass through; the SDK owns defaults. */
+/**
+ * Model and reasoning effort pass to the SDK verbatim; the SDK owns defaults.
+ * `speed: 'fast'` maps to the SDK's `fastMode` settings key (the `/fast`
+ * toggle); `standard` keeps the SDK default. Unknown values are ignored.
+ */
 export function resolveClaudeInference(
-  input: { model?: string; effort?: string; fastMode?: boolean },
+  input: { model?: string; effort?: string; speed?: ProviderSpeed },
   _environment: NodeJS.ProcessEnv,
-): { model?: string; effort?: string; fastMode?: boolean } {
-  return { model: input.model, effort: input.effort, fastMode: input.fastMode };
+): { model?: string; effort?: string; settings?: { fastMode: boolean } } {
+  return {
+    model: input.model,
+    effort: input.effort,
+    ...(input.speed === 'fast' ? { settings: { fastMode: true } } : {}),
+  };
 }
 
 /**
