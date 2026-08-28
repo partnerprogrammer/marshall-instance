@@ -277,9 +277,10 @@ export async function handleEngagedSessionCreated(event: SessionCreatedEvent): P
     content: JSON.stringify({
       text:
         `Thread-moderation notice: the message you are about to answer appears to continue an earlier thread — ` +
-        `${pointer} — "${snippet(match.candidate.rootText)}". Apply the channel's thread norm in your ONE reply: ` +
-        `answer the person here, and visibly point the conversation back to that thread (share the link) so it ` +
-        `continues there. Do not send a separate redirect message.`,
+        `${pointer} — "${snippet(match.candidate.rootText)}". Apply the channel's thread norm: do NOT answer the ` +
+        `question here. Reply ONLY with a brief, friendly redirect to that thread (share the link) — e.g. "This ` +
+        `continues the thread here: <link> — ask me there and I'll pick it up." One short message, no substance, ` +
+        `no partial answer.`,
       sender: 'system',
       senderId: 'system',
       echo: { surface: 'thread-nudge', label: 'thread-moderation notice' },
