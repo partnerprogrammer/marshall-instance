@@ -35,15 +35,18 @@ pattern. That means the interval is cheap to run often; it isn't bounded by
 cron's one-minute floor the way `ncl tasks` would be.
 
 **Messages that @-mention the bot take a different path.** A mention is a
-message TO the bot — the agent answers it in place, so a public nudge next
-to that answer would be contradictory noise (live-hit). The poll skips
-mention openers entirely; instead, a session-created hook (which fires
-exactly for engaged sessions) runs the same classification immediately
-and, on a match, injects a `trigger:false` context note into the session
-before the agent reads the question — so the agent folds the redirect into
-its own single reply. If that race is ever lost (container reads before
-the note lands), it degrades to inert ambient context, never a second
-channel message.
+message TO the bot — the agent would normally answer it in place, and a
+nudge stacked next to a full answer is contradictory noise (live-hit). The
+poll skips mention openers entirely; instead, a session-created hook
+(which fires exactly for engaged sessions) runs the same classification
+immediately and, on a match, posts the SAME standard public nudge
+(identical text, identical 👎 dismissal, same `thread-nudge:<id>` outbound
+id — so the feedback skill watches it too) and injects a `trigger:false`
+context note telling the agent the nudge already answered: send nothing.
+The nudge IS the reply; the person either continues in the linked thread
+or dismisses with 👎. If the injection race is ever lost (container reads
+before the note lands), it degrades to the agent also answering — rare,
+and self-explaining next to the nudge.
 
 ## How it decides
 

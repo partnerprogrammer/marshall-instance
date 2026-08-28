@@ -456,7 +456,7 @@ describe('handleEngagedSessionCreated', () => {
     expect(registeredHooks).toHaveLength(1);
   });
 
-  it('injects a trigger:false context note into the session when the mention continues another thread', async () => {
+  it('posts the STANDARD public nudge (👎 and all) and silences the agent when the mention continues another thread', async () => {
     const session = freshSession();
     collectCandidates.mockResolvedValue([{ sessionId: 'sess-a', threadId: 'slack:C1:1.0' }]);
     findRelatedThread.mockReturnValue({
@@ -467,7 +467,25 @@ describe('handleEngagedSessionCreated', () => {
 
     await handleEngagedSessionCreated(engagedEvent(session, 'any news on the deploy?'));
 
-    expect(writeOutboundDirect).not.toHaveBeenCalled(); // no public message on this path
+    // Same nudge as the poll path: same outbound id + threadNudge marker
+    // (so the 👎 feedback module watches it), same text shape.
+    expect(writeOutboundDirect).toHaveBeenCalledTimes(1);
+    const [nudgeAg, nudgeSession, nudgeMsg] = writeOutboundDirect.mock.calls[0]!;
+    expect(nudgeAg).toBe(session.agent_group_id);
+    expect(nudgeSession).toBe(session.id);
+    expect(nudgeMsg).toMatchObject({
+      id: `thread-nudge:${session.id}`,
+      platformId: 'slack:C1',
+      channelType: 'slack',
+      threadId: session.thread_id,
+    });
+    const nudgeContent = JSON.parse(nudgeMsg.content) as { text: string; threadNudge: boolean };
+    expect(nudgeContent.threadNudge).toBe(true);
+    expect(nudgeContent.text).toContain('https://pp.slack.com/archives/C1/p1710000000000000');
+    expect(nudgeContent.text).toContain('the deploy pipeline is stuck');
+    expect(nudgeContent.text).toContain('👎');
+
+    // Plus the silence note so the agent sends nothing on top of the nudge.
     expect(writeSessionMessage).toHaveBeenCalledTimes(1);
     const [agentGroupId, sessionId, msg] = writeSessionMessage.mock.calls[0]!;
     expect(agentGroupId).toBe(session.agent_group_id);
@@ -476,8 +494,7 @@ describe('handleEngagedSessionCreated', () => {
     const content = JSON.parse(msg.content) as { text: string; echo?: unknown };
     // Marked as an echo so getThreadOpener never mistakes it for the real opener.
     expect(content.echo).toBeDefined();
-    expect(content.text).toContain('https://pp.slack.com/archives/C1/p1710000000000000');
-    expect(content.text).toContain('the deploy pipeline is stuck');
+    expect(content.text).toContain('Do NOT send any reply');
   });
 
   it('does nothing when the channel is not allowlisted', async () => {

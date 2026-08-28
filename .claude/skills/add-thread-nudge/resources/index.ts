@@ -267,8 +267,21 @@ export async function handleEngagedSessionCreated(event: SessionCreatedEvent): P
   const match = findRelatedThread(text, candidates);
   if (!match) return;
 
-  const permalink = await slackPermalink(mg, match.candidate.threadId);
-  const pointer = permalink ?? 'the related thread in this channel';
+  // Post the STANDARD public nudge — identical text, identical 👎
+  // dismissal affordance, and the same `thread-nudge:<id>` outbound id +
+  // threadNudge marker, so the feedback module (CUP-4870) watches this
+  // nudge exactly like a poll-path one. Uniform UX across both paths is
+  // deliberate (operator decision): the nudge IS the reply.
+  await writeOutboundDirect(session.agent_group_id, session.id, {
+    id: `thread-nudge:${session.id}`,
+    kind: 'chat',
+    platformId: mg.platform_id,
+    channelType: mg.channel_type,
+    threadId: session.thread_id,
+    content: JSON.stringify({ text: await nudgeText(mg, match.candidate), threadNudge: true }),
+  });
+
+  // Then tell the agent to stay silent: the nudge already answered.
   await writeSessionMessage(session.agent_group_id, session.id, {
     id: `thread-nudge-context:${session.id}`,
     kind: 'chat',
@@ -276,18 +289,18 @@ export async function handleEngagedSessionCreated(event: SessionCreatedEvent): P
     channelType: 'session-echo',
     content: JSON.stringify({
       text:
-        `Thread-moderation notice: the message you are about to answer appears to continue an earlier thread — ` +
-        `${pointer} — "${snippet(match.candidate.rootText)}". Apply the channel's thread norm: do NOT answer the ` +
-        `question here. Reply ONLY with a brief, friendly redirect to that thread (share the link) — e.g. "This ` +
-        `continues the thread here: <link> — ask me there and I'll pick it up." One short message, no substance, ` +
-        `no partial answer.`,
+        `Thread-moderation notice: the message you were just asked appears to continue an earlier thread, and a ` +
+        `public thread-nudge (with the 👎 dismissal option) has ALREADY been posted in this thread as the ` +
+        `complete response. Do NOT send any reply to this question — not an answer, not a redirect, nothing. ` +
+        `The person will either continue in the linked thread (answer them there when they do) or dismiss the ` +
+        `nudge with 👎.`,
       sender: 'system',
       senderId: 'system',
       echo: { surface: 'thread-nudge', label: 'thread-moderation notice' },
     }),
     trigger: false,
   });
-  log.info('Thread nudge context injected for engaged session', {
+  log.info('Thread nudge posted for engaged session (agent silenced)', {
     sessionId: session.id,
     messagingGroupId: mg.id,
     reason: match.reason,
