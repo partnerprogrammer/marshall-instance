@@ -34,6 +34,17 @@ host-side SQLite reads, matching `host-sweep.ts`'s own plain `setInterval`
 pattern. That means the interval is cheap to run often; it isn't bounded by
 cron's one-minute floor the way `ncl tasks` would be.
 
+**Messages that @-mention the bot take a different path.** A mention is a
+message TO the bot — the agent answers it in place, so a public nudge next
+to that answer would be contradictory noise (live-hit). The poll skips
+mention openers entirely; instead, a session-created hook (which fires
+exactly for engaged sessions) runs the same classification immediately
+and, on a match, injects a `trigger:false` context note into the session
+before the agent reads the question — so the agent folds the redirect into
+its own single reply. If that race is ever lost (container reads before
+the note lands), it degrades to inert ambient context, never a second
+channel message.
+
 ## How it decides
 
 No semantic index or embeddings — a recency-bounded heuristic, matching the

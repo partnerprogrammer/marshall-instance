@@ -29,7 +29,9 @@ import { getMessagingGroup, getMessagingGroupAgents } from '../../db/messaging-g
 import { getSessionsByAgentGroup, isTaskThread } from '../../db/sessions.js';
 import { readEnvFile } from '../../env.js';
 import { log } from '../../log.js';
-import { withExistingMailboxSession, writeOutboundDirect } from '../../session-manager.js';
+import type { SessionCreatedEvent } from '../../router.js';
+import { registerSessionCreatedHook } from '../../router.js';
+import { withExistingMailboxSession, writeOutboundDirect, writeSessionMessage } from '../../session-manager.js';
 import type { MessagingGroup, Session } from '../../types.js';
 import type { CandidateThread } from './classify.js';
 import { collectCandidates, findRelatedThread, getThreadOpener } from './classify.js';
@@ -229,6 +231,69 @@ async function pollTick(): Promise<void> {
     pollInFlight = false;
   }
 }
+
+/**
+ * Engaged-session path: a message that @-mentions the bot never gets the
+ * public nudge (checkSession skips isMention openers — a nudge next to the
+ * agent's own answer is contradictory noise), but the thread norm still
+ * applies to conversations WITH Marshall. So when an engaged session's
+ * opening message continues another recent thread, this injects a
+ * trigger:false context note into the session BEFORE the agent reads the
+ * question (the session-created hook fires during routing; the container
+ * takes seconds to spawn, so the note lands in the agent's first read),
+ * instructing the agent to fold the redirect into its own single reply.
+ *
+ * Marked with the cross-session `echo` shape so getThreadOpener never
+ * mistakes it for the session's real opener. If the race is ever lost
+ * (note lands after the agent already answered), it degrades to inert
+ * ambient context — never a second message in the channel.
+ */
+export async function handleEngagedSessionCreated(event: SessionCreatedEvent): Promise<void> {
+  const { session, mg } = event;
+  if (!THREAD_NUDGE_MESSAGING_GROUPS.has(mg.id)) return;
+  if (mg.is_group !== 1) return;
+  if (session.thread_id === null || isTaskThread(session.thread_id)) return;
+
+  let text: string | undefined;
+  try {
+    text = (JSON.parse(event.message.content) as { text?: string }).text;
+  } catch {
+    return;
+  }
+  if (!text) return;
+
+  const candidates = await collectCandidates(session.agent_group_id, session, mg.id);
+  if (candidates.length === 0) return;
+  const match = findRelatedThread(text, candidates);
+  if (!match) return;
+
+  const permalink = await slackPermalink(mg, match.candidate.threadId);
+  const pointer = permalink ?? 'the related thread in this channel';
+  await writeSessionMessage(session.agent_group_id, session.id, {
+    id: `thread-nudge-context:${session.id}`,
+    kind: 'chat',
+    timestamp: new Date().toISOString(),
+    channelType: 'session-echo',
+    content: JSON.stringify({
+      text:
+        `Thread-moderation notice: the message you are about to answer appears to continue an earlier thread — ` +
+        `${pointer} — "${snippet(match.candidate.rootText)}". Apply the channel's thread norm in your ONE reply: ` +
+        `answer the person here, and visibly point the conversation back to that thread (share the link) so it ` +
+        `continues there. Do not send a separate redirect message.`,
+      sender: 'system',
+      senderId: 'system',
+      echo: { surface: 'thread-nudge', label: 'thread-moderation notice' },
+    }),
+    trigger: false,
+  });
+  log.info('Thread nudge context injected for engaged session', {
+    sessionId: session.id,
+    messagingGroupId: mg.id,
+    reason: match.reason,
+  });
+}
+
+registerSessionCreatedHook((event) => handleEngagedSessionCreated(event));
 
 if (THREAD_NUDGE_MESSAGING_GROUPS.size > 0) {
   setInterval(() => void pollTick(), POLL_INTERVAL_MS);

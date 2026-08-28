@@ -43,6 +43,9 @@ vi.mock('../../db/sessions.js', () => ({
   getSessionsByAgentGroup: async (agentGroupId: string) => sessionsByAgentGroup[agentGroupId] ?? [],
   isTaskThread: (t: string) => t.startsWith('system:tasks'),
 }));
+const writeSessionMessage = vi.fn();
+const registeredHooks: Array<(event: unknown) => unknown> = [];
+
 vi.mock('../../session-manager.js', () => ({
   withExistingMailboxSession: async (_g: string, sessionId: string, action: (m: unknown) => unknown) =>
     action({
@@ -50,6 +53,10 @@ vi.mock('../../session-manager.js', () => ({
       getOutboundHistory: () => outboundHistoryBySession[sessionId] ?? [],
     }),
   writeOutboundDirect,
+  writeSessionMessage,
+}));
+vi.mock('../../router.js', () => ({
+  registerSessionCreatedHook: (hook: (event: unknown) => unknown) => registeredHooks.push(hook),
 }));
 // getThreadOpener is left as the REAL implementation (only collectCandidates
 // and findRelatedThread — the actual classification step — are mocked), so
@@ -76,7 +83,7 @@ vi.mock('./config.js', () => ({
   NUDGE_SNIPPET_MAX_CHARS: 80,
 }));
 
-const { checkSession, pollThreadNudge } = await import('./index.js');
+const { checkSession, pollThreadNudge, handleEngagedSessionCreated } = await import('./index.js');
 
 function chat(text: string, senderId = 'U1'): string {
   return JSON.stringify({ text, senderId });
@@ -117,6 +124,7 @@ beforeEach(() => {
   collectCandidates.mockReset();
   findRelatedThread.mockReset();
   writeOutboundDirect.mockReset();
+  writeSessionMessage.mockReset();
   fetchMock.mockReset();
   fetchMock.mockResolvedValue({
     json: async () => ({ ok: true, permalink: 'https://pp.slack.com/archives/C1/p1710000000000000' }),
@@ -423,6 +431,73 @@ describe('pollThreadNudge', () => {
     collectCandidates.mockClear();
     await pollThreadNudge();
 
+    expect(collectCandidates).not.toHaveBeenCalled();
+  });
+});
+
+describe('handleEngagedSessionCreated', () => {
+  function engagedEvent(session: Record<string, unknown>, text: string, mgOverrides: Record<string, unknown> = {}) {
+    return {
+      session,
+      mg: { ...MG_BASE, ...mgOverrides },
+      platformId: 'slack:C1',
+      threadId: session.thread_id,
+      sessionMode: 'per-thread',
+      message: {
+        id: 'msg-1',
+        kind: 'chat-sdk',
+        content: JSON.stringify({ text, senderId: 'U1', isMention: true }),
+        timestamp: new Date().toISOString(),
+      },
+    } as never;
+  }
+
+  it('registers exactly one session-created hook at import time', () => {
+    expect(registeredHooks).toHaveLength(1);
+  });
+
+  it('injects a trigger:false context note into the session when the mention continues another thread', async () => {
+    const session = freshSession();
+    collectCandidates.mockResolvedValue([{ sessionId: 'sess-a', threadId: 'slack:C1:1.0' }]);
+    findRelatedThread.mockReturnValue({
+      candidate: { sessionId: 'sess-a', threadId: 'slack:C1:1.0', rootText: 'the deploy pipeline is stuck' },
+      sharedKeywords: ['deploy'],
+      reason: 'keywords',
+    });
+
+    await handleEngagedSessionCreated(engagedEvent(session, 'any news on the deploy?'));
+
+    expect(writeOutboundDirect).not.toHaveBeenCalled(); // no public message on this path
+    expect(writeSessionMessage).toHaveBeenCalledTimes(1);
+    const [agentGroupId, sessionId, msg] = writeSessionMessage.mock.calls[0]!;
+    expect(agentGroupId).toBe(session.agent_group_id);
+    expect(sessionId).toBe(session.id);
+    expect(msg).toMatchObject({ channelType: 'session-echo', trigger: false });
+    const content = JSON.parse(msg.content) as { text: string; echo?: unknown };
+    // Marked as an echo so getThreadOpener never mistakes it for the real opener.
+    expect(content.echo).toBeDefined();
+    expect(content.text).toContain('https://pp.slack.com/archives/C1/p1710000000000000');
+    expect(content.text).toContain('the deploy pipeline is stuck');
+  });
+
+  it('does nothing when the channel is not allowlisted', async () => {
+    const session = freshSession();
+    await handleEngagedSessionCreated(engagedEvent(session, 'any news on the deploy?', { id: 'mg-other' }));
+    expect(collectCandidates).not.toHaveBeenCalled();
+    expect(writeSessionMessage).not.toHaveBeenCalled();
+  });
+
+  it('does nothing when no candidate matches', async () => {
+    const session = freshSession();
+    collectCandidates.mockResolvedValue([{ sessionId: 'sess-a', threadId: 'slack:C1:1.0' }]);
+    findRelatedThread.mockReturnValue(null);
+    await handleEngagedSessionCreated(engagedEvent(session, 'good morning'));
+    expect(writeSessionMessage).not.toHaveBeenCalled();
+  });
+
+  it('does nothing for a session with no real thread_id', async () => {
+    const session = freshSession({ thread_id: null });
+    await handleEngagedSessionCreated(engagedEvent(session, 'any news on the deploy?'));
     expect(collectCandidates).not.toHaveBeenCalled();
   });
 });
