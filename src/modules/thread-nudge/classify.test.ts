@@ -28,7 +28,8 @@ vi.mock('../../session-manager.js', () => ({
     fn({ getInboundHistory: () => historyBySession[sessionId] ?? [] }),
 }));
 
-const { collectCandidates, findRelatedThread, significantKeywords, mentionedUserIds } = await import('./classify.js');
+const { collectCandidates, findRelatedThread, getThreadOpener, significantKeywords, mentionedUserIds } =
+  await import('./classify.js');
 
 function chat(text: string, senderId = 'U1'): string {
   return JSON.stringify({ text, sender: 'someone', senderId });
@@ -171,6 +172,23 @@ describe('collectCandidates', () => {
     const candidates = await collectCandidates('ag-1', newSession, 'mg-1');
 
     expect(candidates).toEqual([]);
+  });
+});
+
+describe('getThreadOpener', () => {
+  it("surfaces the opener's isMention flag (true when the message @-mentioned the bot, false otherwise)", async () => {
+    siblingSessions = [];
+    historyBySession['sess-m'] = [
+      {
+        timestamp: new Date().toISOString(),
+        kind: 'chat-sdk',
+        content: JSON.stringify({ text: 'hey bot', senderId: 'U1', isMention: true }),
+      },
+    ];
+    historyBySession['sess-plain'] = rootHistory(new Date().toISOString(), 'just humans talking');
+
+    expect((await getThreadOpener('ag-1', 'sess-m'))?.isMention).toBe(true);
+    expect((await getThreadOpener('ag-1', 'sess-plain'))?.isMention).toBe(false);
   });
 });
 

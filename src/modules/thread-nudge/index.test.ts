@@ -155,6 +155,31 @@ describe('checkSession', () => {
     expect(collectCandidates).not.toHaveBeenCalled();
   });
 
+  it('never nudges a session whose opener @-mentions the bot — the agent answers it in place', async () => {
+    // Live-hit (2026-08-28): a "@Marshall do you have access to github?"
+    // question got both a nudge ("go continue over there") and the agent's
+    // full answer seconds apart — contradictory noise. A message TO the bot
+    // is never an off-thread human↔human reply.
+    const session = freshSession();
+    historyBySession[session.id] = [
+      {
+        timestamp: new Date().toISOString(),
+        kind: 'chat-sdk',
+        content: JSON.stringify({ text: 'do you have access to github?', senderId: 'U1', isMention: true }),
+      },
+    ];
+    collectCandidates.mockResolvedValue([{ sessionId: 'sess-a', threadId: 'slack:C1:1.0' }]);
+
+    await checkSession('ag-1', MG, session as never);
+
+    expect(collectCandidates).not.toHaveBeenCalled();
+    expect(writeOutboundDirect).not.toHaveBeenCalled();
+
+    // Decided once, memoized forever — later ticks do no further work.
+    await checkSession('ag-1', MG, session as never);
+    expect(collectCandidates).not.toHaveBeenCalled();
+  });
+
   it('skips a session already nudged (persisted outbound history)', async () => {
     const session = freshSession();
     setOpener(session.id, 'following up on the deploy');

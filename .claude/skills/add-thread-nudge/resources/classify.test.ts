@@ -28,7 +28,9 @@ vi.mock('../../session-manager.js', () => ({
     fn({ getInboundHistory: () => historyBySession[sessionId] ?? [] }),
 }));
 
-const { collectCandidates, findRelatedThread, significantKeywords, mentionedUserIds } = await import('./classify.js');
+const { collectCandidates, findRelatedThread, getThreadOpener, significantKeywords, mentionedUserIds } = await import(
+  './classify.js'
+);
 
 function chat(text: string, senderId = 'U1'): string {
   return JSON.stringify({ text, sender: 'someone', senderId });
@@ -84,6 +86,19 @@ describe('collectCandidates', () => {
     expect(candidates).toEqual([]);
   });
 
+  it('excludes a sibling with no real thread_id (non-threaded/shared-mode session)', async () => {
+    // There's no navigable thread to point a nudge at, so it can't be a
+    // candidate even if its opening message would otherwise match well.
+    siblingSessions = [{ id: 'sess-shared', status: 'active', messaging_group_id: 'mg-1', thread_id: null }];
+    historyBySession = {
+      'sess-shared': rootHistory(new Date(Date.now() - 5 * 60_000).toISOString(), 'deploy pipeline is stuck'),
+    };
+
+    const candidates = await collectCandidates('ag-1', NEW_SESSION, 'mg-1');
+
+    expect(candidates).toEqual([]);
+  });
+
   it('excludes siblings whose root message is older than the recency window', async () => {
     siblingSessions = [{ id: 'sess-stale', status: 'active', messaging_group_id: 'mg-1', thread_id: 'slack:C1:1.0' }];
     historyBySession = {
@@ -100,7 +115,9 @@ describe('collectCandidates', () => {
     // with trigger=1 (i.e. wake=true), so a sibling that only ever posted a
     // top-level message without mentioning the bot was previously invisible
     // as a candidate — exactly the sessions this module exists to nudge.
-    siblingSessions = [{ id: 'sess-never-engaged', status: 'active', messaging_group_id: 'mg-1', thread_id: 'slack:C1:1.0' }];
+    siblingSessions = [
+      { id: 'sess-never-engaged', status: 'active', messaging_group_id: 'mg-1', thread_id: 'slack:C1:1.0' },
+    ];
     historyBySession = {
       'sess-never-engaged': rootHistory(new Date(Date.now() - 5 * 60_000).toISOString(), 'deploy pipeline is stuck'),
     };
@@ -126,7 +143,11 @@ describe('collectCandidates', () => {
         {
           timestamp: new Date(Date.now() - 6 * 60_000).toISOString(),
           kind: 'chat',
-          content: JSON.stringify({ text: 'echoed context from another thread', senderId: 'U3', echo: { surface: 'x', label: 'y' } }),
+          content: JSON.stringify({
+            text: 'echoed context from another thread',
+            senderId: 'U3',
+            echo: { surface: 'x', label: 'y' },
+          }),
         },
       ],
     };
@@ -152,6 +173,23 @@ describe('collectCandidates', () => {
     const candidates = await collectCandidates('ag-1', newSession, 'mg-1');
 
     expect(candidates).toEqual([]);
+  });
+});
+
+describe('getThreadOpener', () => {
+  it("surfaces the opener's isMention flag (true when the message @-mentioned the bot, false otherwise)", async () => {
+    siblingSessions = [];
+    historyBySession['sess-m'] = [
+      {
+        timestamp: new Date().toISOString(),
+        kind: 'chat-sdk',
+        content: JSON.stringify({ text: 'hey bot', senderId: 'U1', isMention: true }),
+      },
+    ];
+    historyBySession['sess-plain'] = rootHistory(new Date().toISOString(), 'just humans talking');
+
+    expect((await getThreadOpener('ag-1', 'sess-m'))?.isMention).toBe(true);
+    expect((await getThreadOpener('ag-1', 'sess-plain'))?.isMention).toBe(false);
   });
 });
 

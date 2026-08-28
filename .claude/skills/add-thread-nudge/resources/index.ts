@@ -141,6 +141,17 @@ export async function checkSession(agentGroupId: string, mg: MessagingGroup, ses
 
   const opener = await getThreadOpener(agentGroupId, session.id);
   if (!opener) return;
+
+  // A message that @-mentions the bot is a message TO Marshall — the agent
+  // will answer it right here, so a nudge saying "go continue over there"
+  // stacked on top of that answer is contradictory noise (live-hit,
+  // 2026-08-28: a "@Marshall do you have access to github?" question got
+  // both a nudge and a full answer seconds apart). The nudge exists for
+  // human↔human context loss, not conversations with the bot itself.
+  if (opener.isMention) {
+    decided.set(session.id, createdAt);
+    return;
+  }
   const text = opener.text;
 
   if (await alreadyNudged(agentGroupId, session.id)) {

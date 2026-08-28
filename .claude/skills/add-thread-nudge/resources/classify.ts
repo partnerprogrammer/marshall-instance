@@ -62,9 +62,21 @@ const STOPWORDS = new Set([
   'hello',
 ]);
 
-function parseContent(raw: string): { text?: string; sender?: string; senderId?: string; echo?: unknown } {
+function parseContent(raw: string): {
+  text?: string;
+  sender?: string;
+  senderId?: string;
+  echo?: unknown;
+  isMention?: boolean;
+} {
   try {
-    return JSON.parse(raw) as { text?: string; sender?: string; senderId?: string; echo?: unknown };
+    return JSON.parse(raw) as {
+      text?: string;
+      sender?: string;
+      senderId?: string;
+      echo?: unknown;
+      isMention?: boolean;
+    };
   } catch {
     return {};
   }
@@ -74,6 +86,9 @@ export interface ThreadOpener {
   timestamp: string;
   text: string;
   senderId: string;
+  /** The opener @-mentioned the bot (chat-sdk's isMention flag) — i.e. this
+   *  is a message TO Marshall, which the agent will answer in place. */
+  isMention: boolean;
 }
 
 /**
@@ -101,7 +116,7 @@ export async function getThreadOpener(agentGroupId: string, sessionId: string): 
     const c = parseContent(row.content);
     if (c.echo !== undefined) continue;
     if (!c.text || !c.senderId || c.senderId === 'system' || c.sender === 'system') continue;
-    return { timestamp: row.timestamp, text: c.text, senderId: c.senderId };
+    return { timestamp: row.timestamp, text: c.text, senderId: c.senderId, isMention: c.isMention === true };
   }
   return undefined;
 }
@@ -135,12 +150,15 @@ export async function collectCandidates(
   session: Session,
   messagingGroupId: string,
 ): Promise<CandidateThread[]> {
+  // thread_id === null means a non-threaded/shared-mode session — there's
+  // no navigable thread to point a nudge at, so it can't be a candidate.
   const siblings = (await getSessionsByAgentGroup(agentGroupId)).filter(
     (s) =>
       s.id !== session.id &&
       s.status === 'active' &&
       s.messaging_group_id === messagingGroupId &&
-      !(s.thread_id !== null && isTaskThread(s.thread_id)),
+      s.thread_id !== null &&
+      !isTaskThread(s.thread_id),
   );
   if (siblings.length === 0) return [];
 
