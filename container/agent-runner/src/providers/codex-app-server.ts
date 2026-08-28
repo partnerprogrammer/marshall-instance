@@ -390,7 +390,7 @@ export function attachCodexAutoApproval(server: AppServer): void {
 export function writeCodexConfigToml(
   servers: Record<string, McpServerConfig>,
   memorySessionHook: CodexMemorySessionHook,
-  opts: { model?: string; effort?: string } = {},
+  opts: { model?: string; effort?: string; speed?: string } = {},
 ): void {
   const codexConfigDir = path.join(process.env.HOME || '/home/node', '.codex');
   fs.mkdirSync(codexConfigDir, { recursive: true });
@@ -415,7 +415,7 @@ export interface CodexConfigPlan {
     approvalPolicy: string;
     projectDocumentMaxBytes: number;
   };
-  inference: { model?: string; effort?: string };
+  inference: { model?: string; effort?: string; speed?: string };
   memory: { memories: false; useMemories: false; generateMemories: false };
   mcpServers: Record<string, McpServerConfig>;
 }
@@ -437,8 +437,14 @@ export function codexExecutionPolicySection(_input: undefined): CodexConfigPlan[
  * legacy provider path normalizes in its constructor and passes the result
  * through `buildCodexConfigPlan` untouched — both land on the same bytes.
  */
-export function codexInferenceSection(input: { model?: string; effort?: string }): CodexConfigPlan['inference'] {
-  return { model: input.model, effort: normalizeCodexEffort(input.effort) };
+export function codexInferenceSection(input: {
+  model?: string;
+  effort?: string;
+  speed?: string;
+}): CodexConfigPlan['inference'] {
+  // Speed is a flag, not a tier picker: Codex is growing more service tiers,
+  // and core commits only to "fast or default" — anything else is dropped.
+  return { model: input.model, effort: normalizeCodexEffort(input.effort), speed: input.speed === 'fast' ? 'fast' : undefined };
 }
 
 export function codexMemorySection(_input: unknown): CodexConfigPlan['memory'] {
@@ -451,7 +457,7 @@ export function codexMcpServersSection(input: Record<string, McpServerConfig>): 
 
 export function buildCodexConfigPlan(
   servers: Record<string, McpServerConfig>,
-  opts: { model?: string; effort?: string } = {},
+  opts: { model?: string; effort?: string; speed?: string } = {},
 ): CodexConfigPlan {
   return {
     executionPolicy: codexExecutionPolicySection(undefined),
@@ -470,12 +476,16 @@ export function renderCodexConfigToml(plan: CodexConfigPlan): string {
   ];
   if (plan.inference.model) lines.push(`model = ${tomlBasicString(plan.inference.model)}`);
   if (plan.inference.effort) lines.push(`model_reasoning_effort = ${tomlBasicString(plan.inference.effort)}`);
+  // Core-owned speed property → Codex service tier. The tier only takes
+  // effect with the fast_mode feature flag, added in [features] below.
+  if (plan.inference.speed) lines.push(`service_tier = ${tomlBasicString(plan.inference.speed)}`);
   lines.push('');
 
   // NanoClaw owns persistent memory across providers. Keep Codex's native
   // memory disabled even if its defaults or a user-level config change.
   lines.push('[features]');
   lines.push(`memories = ${plan.memory.memories}`);
+  if (plan.inference.speed) lines.push('fast_mode = true');
   lines.push('');
   lines.push('[memories]');
   lines.push(`use_memories = ${plan.memory.useMemories}`);
