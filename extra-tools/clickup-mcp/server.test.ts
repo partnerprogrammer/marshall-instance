@@ -226,3 +226,18 @@ describe("MCP transport", () => {
     expect(await handleRequest({ jsonrpc: "2.0", id: 3, method: "nope" })).toBeNull();
   });
 });
+
+describe("rewriteDescription (creator guard — human descriptions are never rewritten)", () => {
+  const { rewriteDescription } = require("./server") as typeof import("./server");
+
+  test("rewrites when Marshall created the task", async () => {
+    const f = fakeFetch({ "/task/": { id: "t1", custom_id: "CUP-4987", creator: { id: 87419960 } } });
+    const out = await rewriteDescription({ task_id: "CUP-4987", markdown: "# New story" }, f);
+    expect(out).toContain("REWRITTEN");
+  });
+
+  test("refuses when a human created the task, pointing at append/comment instead", async () => {
+    const f = fakeFetch({ "/task/": { id: "t2", custom_id: "CUP-1", creator: { id: 6351523 } } });
+    await expect(rewriteDescription({ task_id: "CUP-1", markdown: "x" }, f)).rejects.toThrow(/never rewritten/);
+  });
+});

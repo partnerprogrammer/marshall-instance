@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { callTool, confirmBuild, handleRequest, visibleTools } from "./server";
+import { buildDispatchUpdate, callTool, confirmBuild, handleRequest, visibleTools } from "./server";
 
 function fakeFetch(status: number, body: unknown): typeof fetch {
   return (async () => new Response(JSON.stringify(body), { status })) as unknown as typeof fetch;
@@ -29,6 +29,24 @@ describe("confirmBuild", () => {
 
   test("surfaces an actionable hint on 401 (misconfigured vault entry)", async () => {
     await expect(confirmBuild({ task_id: "868x" }, fakeFetch(401, { error: "Unauthorized" }), HUB)).rejects.toThrow(/OneCLI vault/);
+  });
+});
+
+describe("buildDispatchUpdate", () => {
+  test("enforces todo + Marshall assignment on every dispatch", () => {
+    const body = buildDispatchUpdate();
+    expect(body.status).toBe("todo");
+    expect(body.assignees).toEqual({ add: [87419960] });
+    expect(body.time_estimate).toBeUndefined();
+  });
+
+  test("converts the estimate to milliseconds when given", () => {
+    expect(buildDispatchUpdate(90).time_estimate).toBe(90 * 60_000);
+  });
+
+  test("ignores zero/negative estimates instead of writing garbage", () => {
+    expect(buildDispatchUpdate(0).time_estimate).toBeUndefined();
+    expect(buildDispatchUpdate(-5).time_estimate).toBeUndefined();
   });
 });
 

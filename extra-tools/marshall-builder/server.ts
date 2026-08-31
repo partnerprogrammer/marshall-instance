@@ -30,7 +30,7 @@
 
 import { execFile, execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import repoMap from "./repo-map.json";
 
@@ -347,13 +347,240 @@ async function completeBuildJob(task: { id: string; custom_id?: string | null },
   }
 }
 
+// ---------------------------------------------------------------------------
+// PR-evidence receipts (review-flow Phase A, CUP-4838). The gate that lets a
+// story into review checks for the four receipts under
+// .pp-stack/updates/<branch-slug>/ — ship.json, screenshots.md, message.txt,
+// meta.json. The agent DRAFTS content (message/meta/screenshots — judgment);
+// this code STAMPS, CERTIFIES and VALIDATES (guarantees):
+//   - restamps covers_sha / `Covers:` to HEAD on the agent's drafts
+//   - writes an honest gstack-shaped reviews file (one `ship` row bound to
+//     HEAD, verification_result = whatever the agent attested via the
+//     `verification` arg) and runs pp-stack's canonical bin/pp-ship-receipt
+//     with --reviews-file, so the ship.json schema can never drift from the
+//     validator's expectations
+//   - runs bin/pp-pr-evidence status; only a fully-covered PR is flipped
+//     from draft to ready — anything missing leaves the PR in DRAFT with the
+//     gap named in the return note (never fabricated)
+//
+// Hardened after PR #129 (CUP-4983 live test): the receipts dir is ALWAYS
+// the repo root (`git rev-parse --show-toplevel`), never the agent-supplied
+// worktree_dir — in a monorepo the agent works in a project subfolder and
+// drafted there. Misplaced drafts are swept root-ward, and because
+// pp-pr-evidence grades the WORKING TREE (an uncommitted copy looks
+// "current" while the pushed branch lacks it — exactly how #129 was wrongly
+// promoted), the flip additionally requires all four receipts tracked at
+// the pushed HEAD with a clean receipts dir.
+// ---------------------------------------------------------------------------
+
+const PP_STACK_DIR = process.env.PP_STACK_DIR ?? "/workspace/extra/pp-stack";
+
+export function branchSlug(branch: string): string {
+  // Mirrors pp-pr-evidence's SLUG rule: '/' -> '-', then strip to [A-Za-z0-9._-]
+  return branch.replace(/\//g, "-").replace(/[^A-Za-z0-9._-]/g, "");
+}
+
+export function buildShipRow(input: { branch: string; headSha: string; verification: string }): Record<string, unknown> {
+  return {
+    skill: "ship",
+    timestamp: new Date().toISOString(),
+    verification_result: input.verification,
+    version: null,
+    branch: input.branch,
+    commit_full: input.headSha,
+    via: "marshall-builder",
+  };
+}
+
+/**
+ * Review attestations (review-flow Phase B, CUP-4838). The builder runs
+ * adversarial plan/code reviews as subagents; their outcomes are attested via
+ * finalize_handoff's `reviews` arg and become gstack-shaped rows in the
+ * reviews JSONL, so pp-ship-receipt fills ship.json's `review` /
+ * `adversarial_review` fields instead of leaving them null. Rows are bound to
+ * HEAD (commit_full) like every gstack-review-log row — pp-ship-receipt only
+ * attaches rows current for the certified commit.
+ */
+export interface ReviewAttestations {
+  code_review?: { status: string; issues_found: number; critical: number; findings?: string[] };
+  adversarial_review?: { status: string; gate?: string };
+}
+
+/** gstack-shaped review rows for the reviews JSONL — pure, tested. */
+export function buildReviewRows(reviews: ReviewAttestations | undefined, branch: string, headSha: string): Record<string, unknown>[] {
+  const rows: Record<string, unknown>[] = [];
+  if (reviews?.code_review) {
+    rows.push({
+      skill: "review",
+      timestamp: new Date().toISOString(),
+      status: reviews.code_review.status,
+      issues_found: reviews.code_review.issues_found,
+      critical: reviews.code_review.critical,
+      findings: reviews.code_review.findings ?? [],
+      branch,
+      commit_full: headSha,
+      via: "marshall-builder",
+    });
+  }
+  if (reviews?.adversarial_review) {
+    rows.push({
+      skill: "adversarial-review",
+      timestamp: new Date().toISOString(),
+      status: reviews.adversarial_review.status,
+      source: "marshall-builder",
+      tier: "agent",
+      gate: reviews.adversarial_review.gate ?? null,
+      branch,
+      commit_full: headSha,
+      via: "marshall-builder",
+    });
+  }
+  return rows;
+}
+
+/** Rewrites meta.json's covers_sha (JSON) — pure, tested. */
+export function restampMetaCovers(metaJson: string, headSha: string): string {
+  const meta = JSON.parse(metaJson) as Record<string, unknown>;
+  meta.covers_sha = headSha;
+  return JSON.stringify(meta, null, 2) + "\n";
+}
+
+/** Rewrites/prepends the `Covers: <sha>` line in screenshots.md — pure, tested. */
+export function restampScreenshotsCovers(markdown: string, headSha: string): string {
+  if (/^Covers: [0-9a-f]{7,40}$/m.test(markdown)) {
+    return markdown.replace(/^Covers: [0-9a-f]{7,40}$/m, `Covers: ${headSha}`);
+  }
+  return `Covers: ${headSha}\n\n${markdown}`;
+}
+
+interface ReceiptsResult {
+  note: string;
+  ready: boolean;
+}
+
+const DRAFT_FILES = ["message.txt", "meta.json", "screenshots.md"] as const;
+const RECEIPT_FILES = ["ship.json", ...DRAFT_FILES] as const;
+
+/** Which of the four receipts are NOT tracked in the given `ls-tree -r --name-only` output — pure, tested. */
+export function receiptsMissingFromTree(lsTreeNames: string): string[] {
+  const tracked = new Set(
+    lsTreeNames
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((path) => path.split("/").pop() as string)
+  );
+  return RECEIPT_FILES.filter((f) => !tracked.has(f));
+}
+
+async function ensureEvidenceReceipts(worktreeDir: string, branch: string, verification: string, reviews?: ReviewAttestations): Promise<ReceiptsResult> {
+  const { mkdirSync, writeFileSync, readFileSync, renameSync, rmSync, existsSync: exists } = await import("node:fs");
+  try {
+    // Receipts live at the repo ROOT — worktreeDir is agent-supplied and in a
+    // monorepo points at the project subfolder, not the git toplevel.
+    const repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: worktreeDir, encoding: "utf-8" }).trim();
+    const run = (cmd: string, cmdArgs: string[]) =>
+      execFileSync(cmd, cmdArgs, { cwd: repoRoot, encoding: "utf-8" as const });
+    const headSha = run("git", ["rev-parse", "HEAD"]).trim();
+    const slug = branchSlug(branch);
+    const dir = join(repoRoot, ".pp-stack", "updates", slug);
+    mkdirSync(dir, { recursive: true });
+
+    // 1. Sweep drafts the agent wrote relative to its project dir into the
+    //    canonical root dir (root copy wins if both exist).
+    if (resolve(worktreeDir) !== resolve(repoRoot)) {
+      const strayBase = join(worktreeDir, ".pp-stack");
+      const strayDir = join(strayBase, "updates", slug);
+      for (const file of DRAFT_FILES) {
+        const stray = join(strayDir, file);
+        if (exists(stray) && !exists(join(dir, file))) renameSync(stray, join(dir, file));
+      }
+      if (exists(strayBase)) {
+        run("git", ["rm", "-r", "-f", "-q", "--ignore-unmatch", "--", relative(repoRoot, strayBase)]);
+        rmSync(strayBase, { recursive: true, force: true });
+      }
+    }
+
+    // 2. The agent's drafts — code refuses to invent content it can't know.
+    const missing: string[] = [];
+    for (const file of DRAFT_FILES) {
+      if (!exists(join(dir, file))) missing.push(file);
+    }
+
+    // 3. Restamp what exists to HEAD (drafting happened before the last commit).
+    if (!missing.includes("meta.json")) {
+      writeFileSync(join(dir, "meta.json"), restampMetaCovers(readFileSync(join(dir, "meta.json"), "utf-8"), headSha));
+    }
+    if (!missing.includes("screenshots.md")) {
+      writeFileSync(join(dir, "screenshots.md"), restampScreenshotsCovers(readFileSync(join(dir, "screenshots.md"), "utf-8"), headSha));
+    }
+    run("git", ["add", "-f", ".pp-stack/updates"]);
+    // Porcelain across the whole tree: the stray-sweep's staged deletions live
+    // under the project subfolder, outside a root-relative pathspec.
+    const staged = run("git", ["status", "--porcelain"])
+      .split("\n")
+      .filter((line) => line.includes(".pp-stack/"))
+      .join("\n")
+      .trim();
+    if (staged) run("git", ["commit", "-m", "chore: PR evidence drafts (marshall-builder)"]);
+
+    // 4. Canonical ship.json via pp-stack's own writer (schema never drifts).
+    //    Ship row + any attested review/adversarial rows, all bound to HEAD.
+    const reviewsFile = join(dir, ".reviews.tmp.jsonl");
+    const rowsHead = run("git", ["rev-parse", "HEAD"]).trim();
+    const rows = [...buildReviewRows(reviews, branch, rowsHead), buildShipRow({ branch, headSha: rowsHead, verification })];
+    writeFileSync(reviewsFile, rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
+    try {
+      run("bash", [join(PP_STACK_DIR, "bin", "pp-ship-receipt"), "--base", "main", "--reviews-file", reviewsFile, "--no-push"]);
+    } finally {
+      execFileSync("rm", ["-f", reviewsFile]);
+      // the tmp file may have been swept into the receipt commit's tree scope — drop it from the index too
+      try { run("git", ["rm", "--cached", "--ignore-unmatch", "-q", join(".pp-stack", "updates", slug, ".reviews.tmp.jsonl")]); } catch { /* not tracked */ }
+    }
+    run("git", ["push", "origin", branch]);
+
+    // 5. Validate; only full coverage flips the PR out of draft.
+    if (missing.length > 0) {
+      return { note: `PR left in DRAFT — evidence drafts missing: ${missing.join(", ")} (agent must write them before finalize)`, ready: false };
+    }
+    const statusOut = run("bash", [join(PP_STACK_DIR, "bin", "pp-pr-evidence"), "status", "--json"]);
+    const parsed = JSON.parse(statusOut) as { files?: Array<{ file: string; state: string; reason?: string | null }>; ready?: boolean };
+    if (parsed.ready !== true) {
+      const bad = (parsed.files ?? []).filter((r) => r.state !== "current");
+      const names = bad.map((r) => `${r.file} (${r.state}${r.reason ? `: ${r.reason}` : ""})`).join(", ") || "see pp-pr-evidence output";
+      return { note: `PR left in DRAFT — evidence not current: ${names}`, ready: false };
+    }
+    // 6. Never trust the disk alone: pp-pr-evidence grades the working tree,
+    //    so an uncommitted copy can look "current" while the pushed branch
+    //    lacks it (how PR #129 was wrongly promoted). Require all four
+    //    receipts tracked at the pushed HEAD, with nothing receipt-related
+    //    left uncommitted.
+    const treeNames = run("git", ["ls-tree", "-r", "--name-only", "HEAD", "--", `.pp-stack/updates/${slug}`]);
+    const untracked = receiptsMissingFromTree(treeNames);
+    if (untracked.length > 0) {
+      return { note: `PR left in DRAFT — receipts not committed on the branch: ${untracked.join(", ")}`, ready: false };
+    }
+    const dirty = run("git", ["status", "--porcelain"]).split("\n").some((line) => line.includes(".pp-stack/"));
+    if (dirty) {
+      return { note: "PR left in DRAFT — receipts differ between working tree and committed branch", ready: false };
+    }
+    execFileSync(GH_BIN, ["pr", "ready", branch], { cwd: repoRoot, stdio: "inherit" });
+    return { note: "evidence complete — PR marked ready for review", ready: true };
+  } catch (err) {
+    return { note: `PR left in DRAFT — receipts step failed: ${(err instanceof Error ? err.message : String(err)).slice(0, 200)}`, ready: false };
+  }
+}
+
 /**
  * Verify the session's terminal obligations and enforce whatever it
  * skipped. Throws when no PR exists (or only a CLOSED one) — a "successful"
  * session without an open PR is a silent give-up; the caller's next move
  * should be bounce_to_pm, not a retry.
  */
-export async function finalizeHandoff(args: { task_id: string; worktree_dir: string; branch: string }, f: FetchImpl): Promise<string> {
+export async function finalizeHandoff(
+  args: { task_id: string; worktree_dir: string; branch: string; verification?: string; reviews?: ReviewAttestations },
+  f: FetchImpl
+): Promise<string> {
   const pr = await findPrForBranch(args.worktree_dir, args.branch);
   if (!pr || pr.state === "CLOSED") {
     throw new Error(
@@ -362,14 +589,39 @@ export async function finalizeHandoff(args: { task_id: string; worktree_dir: str
         : "Session ended without opening a PR — nothing to hand off. Call bounce_to_pm."
     );
   }
+  const receipts = await ensureEvidenceReceipts(
+    args.worktree_dir,
+    args.branch,
+    args.verification ?? "unattested (agent passed no verification summary)",
+    args.reviews
+  );
   const task = await getTask(args.task_id, f); // re-fetch: a human may have already moved it
   const body = planHandoff(task, pr.url, pmUserIdFor(task));
   const jobNote = await completeBuildJob(task, f);
   if (body) {
     await updateTask(task.id, body, f);
-    return `${displayTaskId(task)}: enforced handoff (${Object.keys(body).join(", ")}) — PR ${pr.url} (${jobNote})`;
+    return `${displayTaskId(task)}: enforced handoff (${Object.keys(body).join(", ")}) — PR ${pr.url} (${receipts.note}; ${jobNote})`;
   }
-  return `${displayTaskId(task)}: handoff already complete — PR ${pr.url} (${jobNote})`;
+  return `${displayTaskId(task)}: handoff already complete — PR ${pr.url} (${receipts.note}; ${jobNote})`;
+}
+
+// ---------------------------------------------------------------------------
+// post_ac_evidence (review-flow Phase B, CUP-4838). The ONE sanctioned
+// generic-looking ClickUp write the builder has: a comment on the task it is
+// building, carrying the per-AC short-form evidence (autopilot Phase 7).
+// Deliberately a narrow purpose-built tool rather than mounting the generic
+// clickup CLI — writes stay enumerable (prepare/finalize/bounce/evidence) and
+// ride the same gateway-injected auth as every other tool here.
+// ---------------------------------------------------------------------------
+
+export async function postAcEvidence(args: { task_id: string; markdown: string }, f: FetchImpl): Promise<string> {
+  const task = await getTask(args.task_id, f);
+  await clickupFetch(
+    `${API_V2}/task/${task.id}/comment`,
+    { method: "POST", body: JSON.stringify({ comment_text: args.markdown }) },
+    f
+  );
+  return `evidence comment posted on ${displayTaskId(task)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -476,17 +728,56 @@ export const TOOLS: Record<string, ToolDef> = {
   },
   finalize_handoff: {
     description:
-      "Verify and enforce the terminal handoff after a build: PR link appended to the task description if missing, status moved to 'in review' and reassigned to the PM if the task is still 'in progress'. Throws if no open PR exists — call bounce_to_pm instead when this throws. ALWAYS call this before ending a build session, success or failure.",
+      "Verify and enforce the terminal handoff after a build: commits/certifies the PR-evidence receipts (ship.json via pp-stack's canonical writer; restamps your message.txt/meta.json/screenshots.md drafts), validates them with pp-pr-evidence and flips the PR from draft to ready ONLY when all four are current (otherwise the PR stays draft with the gap named); then PR link on the task, status -> 'in review', PM reassignment. Draft message.txt, meta.json and screenshots.md under .pp-stack/updates/<branch-slug>/ BEFORE calling this — the tool stamps and certifies, it never invents content. Pass `verification` with an honest one-line summary of what you actually ran (e.g. 'tsc clean, 204 vitest passing'). Throws if no open PR exists — call bounce_to_pm instead. ALWAYS call this before ending a build session.",
     inputSchema: {
       type: "object",
       properties: {
         task_id: { type: "string" },
         worktree_dir: { type: "string", description: "The worktree path returned by prepare_workspace" },
         branch: { type: "string", description: "The branch name returned by prepare_workspace" },
+        verification: { type: "string", description: "Honest one-line summary of the verification you ran (typecheck/tests/lint results). Recorded verbatim in ship.json." },
+        reviews: {
+          type: "object",
+          description:
+            "Honest attestation of the adversarial reviews you actually ran this build (Phase B methodology). Omit any review that did not happen — never fabricate. Becomes ship.json's review/adversarial_review fields.",
+          properties: {
+            code_review: {
+              type: "object",
+              properties: {
+                status: { type: "string", description: "e.g. 'pass' or 'pass-with-fixes'" },
+                issues_found: { type: "number" },
+                critical: { type: "number" },
+                findings: { type: "array", items: { type: "string" }, description: "One line per finding, with how it was resolved" },
+              },
+              required: ["status", "issues_found", "critical"],
+            },
+            adversarial_review: {
+              type: "object",
+              properties: {
+                status: { type: "string" },
+                gate: { type: "string", description: "e.g. 'plan' or 'code'" },
+              },
+              required: ["status"],
+            },
+          },
+        },
       },
       required: ["task_id", "worktree_dir", "branch"],
     },
     handler: finalizeHandoff,
+  },
+  post_ac_evidence: {
+    description:
+      "Post the per-AC short-form evidence comment on the task you are building (autopilot Phase 7). Register: per AC, 2-3 terse capability-first bullets on what it now does + a deep link to the exact page. NO fenced code, NO line permalinks, NO internal-tooling references; the PR link appears once at story level (finalize_handoff already puts it in the description). This is your ONLY generic ClickUp write — evidence on your own task, nothing else, ever.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task_id: { type: "string" },
+        markdown: { type: "string", description: "The evidence comment, one block per AC" },
+      },
+      required: ["task_id", "markdown"],
+    },
+    handler: postAcEvidence,
   },
   record_work_time: {
     description: "Record a completed ClickUp time entry for the work window since prepare_workspace's started_at. Never throws — call this once, at the very end of every run (success, bounce, or crash-recovery), regardless of outcome.",

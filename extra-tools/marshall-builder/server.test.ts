@@ -2,11 +2,18 @@ import { describe, expect, test } from "bun:test";
 import {
   bounceToPm,
   branchNameForTask,
+  branchSlug,
+  buildReviewRows,
+  buildShipRow,
+  receiptsMissingFromTree,
+  restampMetaCovers,
+  restampScreenshotsCovers,
   formatNeedsInputNote,
   gitConfigEntries,
   handleRequest,
   planHandoff,
   pmUserIdFor,
+  postAcEvidence,
   prepareWorkspace,
   resolveCatalogProject,
   resolvePmUserId,
@@ -158,6 +165,79 @@ describe("gitConfigEntries", () => {
   });
 });
 
+describe("evidence receipts (Phase A helpers)", () => {
+  const SHA = "a".repeat(40);
+
+  test("branchSlug mirrors pp-pr-evidence's rule ('/' -> '-', strip odd chars)", () => {
+    expect(branchSlug("marshall/cup-4966")).toBe("marshall-cup-4966");
+    expect(branchSlug("weird/br@nch name")).toBe("weird-brnchname");
+  });
+
+  test("buildShipRow binds to HEAD and records the agent's attestation verbatim", () => {
+    const row = buildShipRow({ branch: "marshall/cup-1", headSha: SHA, verification: "tsc clean, 12 tests" });
+    expect(row.skill).toBe("ship");
+    expect(row.commit_full).toBe(SHA);
+    expect(row.verification_result).toBe("tsc clean, 12 tests");
+    expect(row.via).toBe("marshall-builder");
+  });
+
+  test("restampMetaCovers rewrites covers_sha and keeps the rest", () => {
+    const out = JSON.parse(restampMetaCovers(JSON.stringify({ covers_sha: "old", pr: 5 }), SHA));
+    expect(out.covers_sha).toBe(SHA);
+    expect(out.pr).toBe(5);
+  });
+
+  test("buildReviewRows emits gstack-shaped rows bound to HEAD, and nothing when no review is attested (never fabricates)", () => {
+    expect(buildReviewRows(undefined, "marshall/cup-1", SHA)).toEqual([]);
+    const rows = buildReviewRows(
+      {
+        code_review: { status: "pass-with-fixes", issues_found: 2, critical: 0, findings: ["off-by-one in week window — fixed"] },
+        adversarial_review: { status: "pass", gate: "code" },
+      },
+      "marshall/cup-1",
+      SHA
+    );
+    expect(rows.map((r) => r.skill)).toEqual(["review", "adversarial-review"]);
+    expect(rows[0].commit_full).toBe(SHA);
+    expect(rows[0].issues_found).toBe(2);
+    expect(rows[1].gate).toBe("code");
+    expect(rows.every((r) => r.via === "marshall-builder")).toBe(true);
+  });
+
+  test("buildReviewRows emits only the attested review when the other did not run", () => {
+    const rows = buildReviewRows({ adversarial_review: { status: "pass" } }, "marshall/cup-1", SHA);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].skill).toBe("adversarial-review");
+    expect(rows[0].gate).toBeNull();
+  });
+
+  test("receiptsMissingFromTree requires all four receipts tracked at HEAD (PR #129: uncommitted disk copies must not count)", () => {
+    const tree = [
+      ".pp-stack/updates/marshall-cup-4983/ship.json",
+      ".pp-stack/updates/marshall-cup-4983/message.txt",
+      ".pp-stack/updates/marshall-cup-4983/meta.json",
+      ".pp-stack/updates/marshall-cup-4983/screenshots.md",
+    ].join("\n");
+    expect(receiptsMissingFromTree(tree)).toEqual([]);
+  });
+
+  test("receiptsMissingFromTree names exactly what the pushed branch lacks", () => {
+    expect(receiptsMissingFromTree(".pp-stack/updates/marshall-cup-4983/ship.json\n")).toEqual([
+      "message.txt",
+      "meta.json",
+      "screenshots.md",
+    ]);
+    expect(receiptsMissingFromTree("")).toEqual(["ship.json", "message.txt", "meta.json", "screenshots.md"]);
+  });
+
+  test("restampScreenshotsCovers replaces an existing Covers line or prepends one", () => {
+    expect(restampScreenshotsCovers(`Covers: ${"b".repeat(40)}\n\nNo UI touched.`, SHA)).toContain(`Covers: ${SHA}`);
+    const prepended = restampScreenshotsCovers("No UI touched.", SHA);
+    expect(prepended.startsWith(`Covers: ${SHA}`)).toBe(true);
+    expect(prepended).toContain("No UI touched.");
+  });
+});
+
 describe("prepareWorkspace", () => {
   test("rejects an unresolved project before touching git", async () => {
     const f = fakeFetch({ "/task/": task() });
@@ -170,10 +250,18 @@ describe("prepareWorkspace", () => {
   });
 });
 
+describe("postAcEvidence", () => {
+  test("posts the evidence comment on the task it is building", async () => {
+    const f = fakeFetch({ "/task/": task() });
+    const result = await postAcEvidence({ task_id: "CUP-4983", markdown: "**AC1** — Points card renders. [My Workload](https://hub.example/dashboard/my-workload)" }, f);
+    expect(result).toContain("evidence comment posted on CUP-4702");
+  });
+});
+
 describe("MCP transport", () => {
-  test("tools/list exposes all four deterministic tools, unconditionally (no write-gate — isolation is the safety boundary here, not a flag)", () => {
+  test("tools/list exposes all five deterministic tools, unconditionally (no write-gate — isolation is the safety boundary here, not a flag)", () => {
     const names = visibleTools().map((t) => t.name);
-    expect(names).toEqual(["prepare_workspace", "finalize_handoff", "record_work_time", "bounce_to_pm"]);
+    expect(names).toEqual(["prepare_workspace", "finalize_handoff", "post_ac_evidence", "record_work_time", "bounce_to_pm"]);
   });
 
   test("initialize reports server identity", async () => {

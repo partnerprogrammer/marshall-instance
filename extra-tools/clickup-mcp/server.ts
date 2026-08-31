@@ -414,6 +414,29 @@ export async function appendDescription(args: { task_id: string; text_md: string
   return `${displayTaskId(current)} description appended (${args.text_md.length} chars).`;
 }
 
+export async function rewriteDescription(args: { task_id: string; markdown: string }, f: FetchImpl): Promise<string> {
+  const id = encodeURIComponent(args.task_id.trim());
+  const current = (await clickupFetch(`${API_V2}/task/${id}?${CUSTOM_ID_PARAMS}`, undefined, f)) as AnyTask & {
+    creator?: { id: number };
+  };
+  // The append-only rule exists to protect HUMAN-authored rich descriptions
+  // (a rewrite flattens their formatting and erases their words). A story
+  // Marshall himself drafted has neither problem — redrafts (SOP reformats,
+  // superseded scope) should replace the text, not stack below it (the
+  // CUP-4987 draft-below-draft mess, 2026-08-29, is exactly this gap).
+  if (current.creator?.id !== MARSHALL_USER_ID) {
+    throw new Error(
+      `Refusing to rewrite: ${displayTaskId(current)} was created by user ${current.creator?.id ?? "unknown"}, not Marshall. Human-authored descriptions are never rewritten — use append_description or a comment instead.`
+    );
+  }
+  await clickupFetch(
+    `${API_V2}/task/${id}?${CUSTOM_ID_PARAMS}`,
+    { method: "PUT", body: JSON.stringify({ markdown_description: args.markdown }) },
+    f
+  );
+  return `${displayTaskId(current)} description REWRITTEN (${args.markdown.length} chars) — previous content replaced.`;
+}
+
 // ---------------------------------------------------------------------------
 // Tool registry
 // ---------------------------------------------------------------------------
@@ -514,6 +537,20 @@ export const TOOLS: Record<string, ToolDef> = {
       required: ["task_id", "text_md"],
     },
     handler: appendDescription,
+    write: true,
+  },
+  rewrite_description: {
+    description:
+      "REPLACE a task's entire description with new markdown. Guarded in code: only works on tasks Marshall himself created (story redrafts, SOP reformats, superseded scope) — refuses on human-created tasks, whose descriptions are NEVER rewritten (append_description or a comment there instead). Requires human approval per Marshall's autonomy rules.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        task_id: { type: "string" },
+        markdown: { type: "string", description: "The complete new description — replaces everything" },
+      },
+      required: ["task_id", "markdown"],
+    },
+    handler: rewriteDescription,
     write: true,
   },
   file_client_request: {
