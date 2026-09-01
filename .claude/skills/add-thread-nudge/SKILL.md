@@ -50,23 +50,32 @@ and self-explaining next to the nudge.
 
 ## How it decides
 
-No semantic index or embeddings — a recency-bounded heuristic, matching the
-posture of the built-in `cross-session-context` module:
+No semantic index or embeddings — but not naive shared-word counting
+either (that shipped first; live testing killed it when "i would like to
+know…" matched every politely-worded English message). The scoring model:
 
 1. Each poll tick, for every active session with a real thread_id in an
    allowlisted channel younger than `NUDGE_CHECK_WINDOW_MINUTES` and not
    already nudged (checked against persisted outbound history, so a host
-   restart never double-posts), collect recent sibling sessions in the same
-   channel (active, real thread_id, within `CANDIDATE_MAX_AGE_MINUTES`),
-   each contributing its opening message. "Real thread_id" is checked
-   per-session, not via the wiring's stored `session_mode` — that column is
-   a label the router can override per-message (a wiring stored as `shared`
-   can still produce per-thread sessions in practice), so it doesn't
-   reliably say what actually happened.
-2. A message matches a candidate when it @-mentions the candidate's opener,
-   or shares at least `MIN_SHARED_KEYWORDS` significant keywords with it.
-3. No match → no-op. This is intentionally conservative; tune the
-   thresholds in `config.ts` against real traffic before loosening them.
+   restart never double-posts), the candidate pool is the channel's last
+   `CANDIDATE_LIMIT` threads — POSITION is the cutoff, not wall-clock (a
+   thread leaves nudge-reach once that many newer conversations exist,
+   whether that takes an hour or a week; `CANDIDATE_MAX_AGE_MINUTES` is
+   only a sanity/cost ceiling). Dead-end threads whose only content is a
+   previous nudge are excluded as targets but still occupy their position.
+   "Real thread_id" is checked per-session, not via the wiring's stored
+   `session_mode` — that column is a label the router can override
+   per-message, so it doesn't reliably say what actually happened.
+2. Relevance score = `Σ (1/df(word)) over shared words × POSITION_DECAY^position`.
+   A word's weight is the inverse of how many candidate openers use it —
+   the channel's own usage defines what's common, so everyday verbs weigh
+   ~nothing and a task id or project name unique to one thread weighs 1.0.
+   Position multiplies (never adds): shared words are the only source of
+   points, position only discounts — the channel's LAST thread is ×1 even
+   hours later, and recency alone can never trigger a nudge. A direct
+   @-mention of a candidate's opener bypasses the threshold.
+3. Nudge only when the best score ≥ `NUDGE_SCORE_THRESHOLD`; otherwise
+   no-op. Intentionally conservative — tune against real traffic.
 
 ## Rollout scope
 
@@ -159,8 +168,9 @@ either way).
 All thresholds live in `config.ts`: `POLL_INTERVAL_MS` (how often to scan —
 cheap, no container wake), `NUDGE_CHECK_WINDOW_MINUTES` (how long a session
 stays eligible for a nudge before it's considered too stale to bother),
-`CANDIDATE_LIMIT` (how many sibling sessions to consider), `CANDIDATE_MAX_AGE_MINUTES`
-(how recent a sibling thread must be to count), `MIN_SHARED_KEYWORDS` /
-`MIN_KEYWORD_LENGTH` (keyword-overlap match bar). Start conservative and
+`CANDIDATE_LIMIT` (the channel's last N threads — the positional cutoff),
+`POSITION_DECAY` / `NUDGE_SCORE_THRESHOLD` (the relevance bar),
+`CANDIDATE_MAX_AGE_MINUTES` (sanity ceiling only), `MIN_KEYWORD_LENGTH`
+(tokens shorter than this are never significant). Start conservative and
 loosen only after watching real false-positive/negative behavior in an
 internal channel.

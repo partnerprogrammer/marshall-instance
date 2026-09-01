@@ -75,10 +75,11 @@ vi.mock('./config.js', () => ({
   // whenever the allowlist is non-empty) never actually fires during tests.
   POLL_INTERVAL_MS: 999_999_999,
   NUDGE_CHECK_WINDOW_MINUTES: 30,
-  CANDIDATE_LIMIT: 12,
-  CANDIDATE_MAX_AGE_MINUTES: 180,
+  CANDIDATE_LIMIT: 8,
+  CANDIDATE_MAX_AGE_MINUTES: 7 * 24 * 60,
+  POSITION_DECAY: 0.7,
+  NUDGE_SCORE_THRESHOLD: 1.0,
   ROOT_LOOKUP_HISTORY_LIMIT: 60,
-  MIN_SHARED_KEYWORDS: 2,
   MIN_KEYWORD_LENGTH: 4,
   NUDGE_SNIPPET_MAX_CHARS: 80,
 }));
@@ -239,6 +240,7 @@ describe('checkSession', () => {
       candidate: { sessionId: 'sess-a', threadId: 'slack:C1:1.0', rootText: 'the deploy pipeline is stuck' },
       sharedKeywords: ['deploy'],
       reason: 'keywords',
+      score: 1.5,
     });
 
     await checkSession('ag-1', MG, session as never);
@@ -275,6 +277,7 @@ describe('checkSession', () => {
       candidate: { sessionId: 'sess-a', threadId: 'slack:C1:1.0', rootText: 'the deploy pipeline is stuck' },
       sharedKeywords: ['deploy'],
       reason: 'keywords',
+      score: 1.5,
     });
 
     await checkSession('ag-1', MG, session as never);
@@ -299,6 +302,7 @@ describe('checkSession', () => {
       candidate: { sessionId: 'sess-a', threadId: 'slack:C1:1.0', rootText: 'the deploy pipeline is stuck' },
       sharedKeywords: ['deploy'],
       reason: 'keywords',
+      score: 1.5,
     });
 
     await checkSession('ag-1', MG, session as never);
@@ -329,6 +333,7 @@ describe('checkSession', () => {
       candidate: { sessionId: 'sess-a', threadId: 'slack:C1:1.0', rootText: 'the deploy pipeline is stuck' },
       sharedKeywords: ['deploy'],
       reason: 'keywords',
+      score: 1.5,
     });
 
     await checkSession('ag-1', MG, session as never);
@@ -463,6 +468,7 @@ describe('handleEngagedSessionCreated', () => {
       candidate: { sessionId: 'sess-a', threadId: 'slack:C1:1.0', rootText: 'the deploy pipeline is stuck' },
       sharedKeywords: ['deploy'],
       reason: 'keywords',
+      score: 1.5,
     });
 
     await handleEngagedSessionCreated(engagedEvent(session, 'any news on the deploy?'));

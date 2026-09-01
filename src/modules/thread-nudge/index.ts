@@ -182,7 +182,12 @@ export async function checkSession(agentGroupId: string, mg: MessagingGroup, ses
     content: JSON.stringify({ text: await nudgeText(mg, match.candidate), threadNudge: true }),
   });
   decided.set(session.id, createdAt);
-  log.info('Thread nudge posted', { sessionId: session.id, messagingGroupId: mg.id, reason: match.reason });
+  log.info('Thread nudge posted', {
+    sessionId: session.id,
+    messagingGroupId: mg.id,
+    reason: match.reason,
+    score: Number(match.score.toFixed(3)),
+  });
 }
 
 export async function pollThreadNudge(): Promise<void> {
@@ -304,6 +309,7 @@ export async function handleEngagedSessionCreated(event: SessionCreatedEvent): P
     sessionId: session.id,
     messagingGroupId: mg.id,
     reason: match.reason,
+    score: Number(match.score.toFixed(3)),
   });
 }
 

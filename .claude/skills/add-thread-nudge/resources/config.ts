@@ -60,12 +60,29 @@ export const POLL_INTERVAL_MS = 45_000;
  *  is, not how much repeat work a shorter poll causes. */
 export const NUDGE_CHECK_WINDOW_MINUTES = 30;
 
-/** How many recent sibling sessions (same messaging group) to consider as candidates. */
-export const CANDIDATE_LIMIT = 12;
+/** The candidate pool is the channel's last N threads — POSITION, not
+ *  wall-clock, is the primary cutoff (operator decision, 2026-09-01): a
+ *  thread leaves nudge-reach once N newer conversations exist, whether that
+ *  takes an hour or a week, so the rule self-adjusts to the channel's own
+ *  rhythm. Low-traffic channels never see threads "expire" for no reason. */
+export const CANDIDATE_LIMIT = 8;
 
-/** Sibling sessions whose root message is older than this are never candidates —
- *  a thread from last week isn't "the thing you just replied to at the top level". */
-export const CANDIDATE_MAX_AGE_MINUTES = 180;
+/** Sanity/cost ceiling only — position (CANDIDATE_LIMIT + POSITION_DECAY)
+ *  is the real cutoff. This just keeps a hibernating channel from pointing
+ *  at archaeological threads, and bounds the DB scan. */
+export const CANDIDATE_MAX_AGE_MINUTES = 7 * 24 * 60;
+
+/** Per-position score multiplier: the newest candidate thread is ×1, the
+ *  one before it ×0.7, five threads back ×0.17. Multiplied (never added) so
+ *  recency alone can never trigger a nudge — shared words are the only
+ *  source of points; position only discounts them. */
+export const POSITION_DECAY = 0.7;
+
+/** Minimum relevance score to post a nudge. Word weights are 1/df within
+ *  the candidate pool, so 1.0 means "at least one word essentially unique
+ *  to that thread, or several moderately rare ones" — common-English verbs
+ *  ("like", "know") shared across many openers sum to far less than this. */
+export const NUDGE_SCORE_THRESHOLD = 1.0;
 
 /** How many recent inbound rows (newest-first) to scan when looking for a
  *  session's real opening message (classify.ts's getThreadOpener). A brand
@@ -76,10 +93,6 @@ export const CANDIDATE_MAX_AGE_MINUTES = 180;
  *  underneath that traffic within NUDGE_CHECK_WINDOW_MINUTES. Cheap: one
  *  indexed local SQLite read. */
 export const ROOT_LOOKUP_HISTORY_LIMIT = 60;
-
-/** Minimum distinct shared significant keywords between the new message and a
- *  candidate's root message for a keyword-overlap match. */
-export const MIN_SHARED_KEYWORDS = 2;
 
 /** Tokens shorter than this are never "significant" (too common/low-signal). */
 export const MIN_KEYWORD_LENGTH = 4;

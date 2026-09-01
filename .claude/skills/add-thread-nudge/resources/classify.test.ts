@@ -1,7 +1,10 @@
 /**
- * Thread-nudge heuristic classification (CUP-4868): candidate gathering
- * (recent sibling threads in the same channel) and relatedness matching
- * (mention or keyword overlap, no semantic index).
+ * Thread-nudge relevance classification (CUP-4868, scoring model of
+ * 2026-09-01): candidate pool = the channel's last CANDIDATE_LIMIT threads
+ * (position is the cutoff, wall-clock only a sanity ceiling), dead-end
+ * exclusion, and score = Σ(1/df) over shared words × POSITION_DECAY^position
+ * gated by NUDGE_SCORE_THRESHOLD — built to kill the live false positives
+ * where common English ("i would like to know…") matched everything.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -16,8 +19,10 @@ let siblingSessions: Array<{
   status: string;
   messaging_group_id: string | null;
   thread_id: string | null;
+  created_at: string;
 }> = [];
 let historyBySession: Record<string, HistoryRow[] | undefined> = {};
+let outboundBySession: Record<string, HistoryRow[] | undefined> = {};
 
 vi.mock('../../db/sessions.js', () => ({
   getSessionsByAgentGroup: () => siblingSessions,
@@ -25,7 +30,10 @@ vi.mock('../../db/sessions.js', () => ({
 }));
 vi.mock('../../session-manager.js', () => ({
   withExistingMailboxSession: (_g: string, sessionId: string, fn: (mailbox: unknown) => unknown) =>
-    fn({ getInboundHistory: () => historyBySession[sessionId] ?? [] }),
+    fn({
+      getInboundHistory: () => historyBySession[sessionId] ?? [],
+      getOutboundHistory: () => outboundBySession[sessionId] ?? [],
+    }),
 }));
 
 const { collectCandidates, findRelatedThread, getThreadOpener, significantKeywords, mentionedUserIds } = await import(
@@ -42,6 +50,26 @@ function rootHistory(timestamp: string, text: string, senderId = 'U1'): HistoryR
   return [{ timestamp, kind: 'chat-sdk', content: chat(text, senderId) }];
 }
 
+function minutesAgo(min: number): string {
+  return new Date(Date.now() - min * 60_000).toISOString();
+}
+
+let siblingCounter = 0;
+/** Registers a sibling session with its opener; returns its id. */
+function addSibling(ageMinutes: number, text: string, senderId = 'U1'): string {
+  siblingCounter += 1;
+  const id = `sib-${siblingCounter}`;
+  siblingSessions.push({
+    id,
+    status: 'active',
+    messaging_group_id: 'mg-1',
+    thread_id: `slack:C1:${siblingCounter}.0`,
+    created_at: minutesAgo(ageMinutes),
+  });
+  historyBySession[id] = rootHistory(minutesAgo(ageMinutes), text, senderId);
+  return id;
+}
+
 const NEW_SESSION_BASE = {
   id: 'sess-new',
   agent_group_id: 'ag-1',
@@ -51,134 +79,231 @@ const NEW_SESSION_BASE = {
 };
 const NEW_SESSION = NEW_SESSION_BASE as never;
 
+/** Candidate literal for findRelatedThread tests. */
+function cand(
+  sessionId: string,
+  position: number,
+  rootText: string,
+  overrides: Partial<{ rootSenderId: string; threadId: string }> = {},
+) {
+  return {
+    sessionId,
+    threadId: overrides.threadId ?? `slack:C1:${position}.0`,
+    rootText,
+    rootSenderId: overrides.rootSenderId ?? 'U100',
+    rootTimestamp: minutesAgo(position * 10),
+    position,
+  };
+}
+
 beforeEach(() => {
   siblingSessions = [];
   historyBySession = {};
+  outboundBySession = {};
+  siblingCounter = 0;
 });
 
 describe('collectCandidates', () => {
-  it('returns active siblings in the same messaging group, newest first', async () => {
-    siblingSessions = [
-      { id: 'sess-old-1', status: 'active', messaging_group_id: 'mg-1', thread_id: 'slack:C1:1.0' },
-      { id: 'sess-old-2', status: 'active', messaging_group_id: 'mg-1', thread_id: 'slack:C1:2.0' },
-      { id: 'sess-other-channel', status: 'active', messaging_group_id: 'mg-2', thread_id: 'slack:C2:1.0' },
-      { id: 'sess-closed', status: 'closed', messaging_group_id: 'mg-1', thread_id: 'slack:C1:3.0' },
-    ];
-    historyBySession = {
-      'sess-old-1': rootHistory(new Date(Date.now() - 60 * 60_000).toISOString(), 'deploy pipeline is stuck'),
-      'sess-old-2': rootHistory(new Date(Date.now() - 30 * 60_000).toISOString(), 'client asked about invoice'),
-    };
+  it('returns the last threads with position 0 = newest', async () => {
+    const older = addSibling(60, 'deploy pipeline is stuck');
+    const newest = addSibling(30, 'client asked about invoice');
 
     const candidates = await collectCandidates('ag-1', NEW_SESSION, 'mg-1');
 
-    expect(candidates.map((c) => c.sessionId)).toEqual(['sess-old-2', 'sess-old-1']);
+    expect(candidates.map((c) => [c.sessionId, c.position])).toEqual([
+      [newest, 0],
+      [older, 1],
+    ]);
   });
 
-  it('excludes task-thread siblings and siblings with no root row', async () => {
+  it('caps the pool at CANDIDATE_LIMIT (8) most recent threads — position is the cutoff', async () => {
+    for (let i = 0; i < 11; i++) addSibling(10 + i, `topic${i} discussion`);
+
+    const candidates = await collectCandidates('ag-1', NEW_SESSION, 'mg-1');
+
+    expect(candidates).toHaveLength(8);
+    expect(candidates[0]?.rootText).toBe('topic0 discussion');
+    expect(candidates[7]?.rootText).toBe('topic7 discussion');
+  });
+
+  it('keeps a thread hours old fully in the pool — wall-clock does not expire candidates', async () => {
+    // Live requirement (operator, 2026-09-01): in a low-traffic channel the
+    // last conversation IS the current conversation even 2h+ later.
+    const id = addSibling(5 * 60, 'prisma migration is failing');
+
+    const candidates = await collectCandidates('ag-1', NEW_SESSION, 'mg-1');
+
+    expect(candidates.map((c) => [c.sessionId, c.position])).toEqual([[id, 0]]);
+  });
+
+  it('excludes threads older than the 7-day sanity ceiling', async () => {
+    addSibling(8 * 24 * 60, 'archaeological thread');
+    const candidates = await collectCandidates('ag-1', NEW_SESSION, 'mg-1');
+    expect(candidates).toEqual([]);
+  });
+
+  it('excludes task threads, other channels, non-active sessions, and openerless threads', async () => {
     siblingSessions = [
-      { id: 'sess-task', status: 'active', messaging_group_id: 'mg-1', thread_id: 'system:tasks:t-1' },
-      { id: 'sess-no-root', status: 'active', messaging_group_id: 'mg-1', thread_id: 'slack:C1:1.0' },
+      {
+        id: 'sess-task',
+        status: 'active',
+        messaging_group_id: 'mg-1',
+        thread_id: 'system:tasks:t-1',
+        created_at: minutesAgo(10),
+      },
+      {
+        id: 'sess-other',
+        status: 'active',
+        messaging_group_id: 'mg-2',
+        thread_id: 'slack:C2:1.0',
+        created_at: minutesAgo(10),
+      },
+      {
+        id: 'sess-closed',
+        status: 'closed',
+        messaging_group_id: 'mg-1',
+        thread_id: 'slack:C1:2.0',
+        created_at: minutesAgo(10),
+      },
+      {
+        id: 'sess-no-root',
+        status: 'active',
+        messaging_group_id: 'mg-1',
+        thread_id: 'slack:C1:3.0',
+        created_at: minutesAgo(10),
+      },
     ];
-    historyBySession = {};
 
     const candidates = await collectCandidates('ag-1', NEW_SESSION, 'mg-1');
 
     expect(candidates).toEqual([]);
-  });
-
-  it('excludes a sibling with no real thread_id (non-threaded/shared-mode session)', async () => {
-    // There's no navigable thread to point a nudge at, so it can't be a
-    // candidate even if its opening message would otherwise match well.
-    siblingSessions = [{ id: 'sess-shared', status: 'active', messaging_group_id: 'mg-1', thread_id: null }];
-    historyBySession = {
-      'sess-shared': rootHistory(new Date(Date.now() - 5 * 60_000).toISOString(), 'deploy pipeline is stuck'),
-    };
-
-    const candidates = await collectCandidates('ag-1', NEW_SESSION, 'mg-1');
-
-    expect(candidates).toEqual([]);
-  });
-
-  it('excludes siblings whose root message is older than the recency window', async () => {
-    siblingSessions = [{ id: 'sess-stale', status: 'active', messaging_group_id: 'mg-1', thread_id: 'slack:C1:1.0' }];
-    historyBySession = {
-      'sess-stale': rootHistory('2020-01-01T00:00:00Z', 'ancient thread'),
-    };
-
-    const candidates = await collectCandidates('ag-1', NEW_SESSION, 'mg-1');
-
-    expect(candidates).toEqual([]);
-  });
-
-  it('finds a sibling whose only message never triggered its container (wake=false) — the CUP-4868 target case', async () => {
-    // Regression: mailbox.getConversationRoot() only returns rows written
-    // with trigger=1 (i.e. wake=true), so a sibling that only ever posted a
-    // top-level message without mentioning the bot was previously invisible
-    // as a candidate — exactly the sessions this module exists to nudge.
-    siblingSessions = [
-      { id: 'sess-never-engaged', status: 'active', messaging_group_id: 'mg-1', thread_id: 'slack:C1:1.0' },
-    ];
-    historyBySession = {
-      'sess-never-engaged': rootHistory(new Date(Date.now() - 5 * 60_000).toISOString(), 'deploy pipeline is stuck'),
-    };
-
-    const candidates = await collectCandidates('ag-1', NEW_SESSION, 'mg-1');
-
-    expect(candidates.map((c) => c.sessionId)).toEqual(['sess-never-engaged']);
-  });
-
-  it('skips cross-session-context echo rows seeded before the real opener', async () => {
-    // backfill.ts writes echo rows at LOWER seq than the real triggering
-    // message, so getInboundHistory's oldest-first walk would otherwise
-    // return an echo (someone else's message, quoted for context) as this
-    // sibling's "opener".
-    siblingSessions = [{ id: 'sess-seeded', status: 'active', messaging_group_id: 'mg-1', thread_id: 'slack:C1:1.0' }];
-    historyBySession = {
-      'sess-seeded': [
-        {
-          timestamp: new Date(Date.now() - 4 * 60_000).toISOString(),
-          kind: 'chat-sdk',
-          content: chat('the real opening message', 'U2'),
-        },
-        {
-          timestamp: new Date(Date.now() - 6 * 60_000).toISOString(),
-          kind: 'chat',
-          content: JSON.stringify({
-            text: 'echoed context from another thread',
-            senderId: 'U3',
-            echo: { surface: 'x', label: 'y' },
-          }),
-        },
-      ],
-    };
-
-    const candidates = await collectCandidates('ag-1', NEW_SESSION, 'mg-1');
-
-    expect(candidates).toHaveLength(1);
-    expect(candidates[0]?.rootText).toBe('the real opening message');
   });
 
   it('excludes a sibling whose opener is newer than the session being checked', async () => {
-    // A message can only continue something said BEFORE it. A sibling
-    // created after `session` must never be offered as a candidate, even if
-    // it would otherwise score well — this is the invariant index.ts's
-    // memoization relies on (a decided session's outcome never changes on a
-    // later tick because candidates are always older, never newer).
-    const newSession = { ...NEW_SESSION_BASE, created_at: new Date(Date.now() - 10 * 60_000).toISOString() } as never;
-    siblingSessions = [{ id: 'sess-future', status: 'active', messaging_group_id: 'mg-1', thread_id: 'slack:C1:1.0' }];
-    historyBySession = {
-      'sess-future': rootHistory(new Date().toISOString(), 'deploy pipeline is stuck'),
-    };
+    const newSession = { ...NEW_SESSION_BASE, created_at: minutesAgo(10) } as never;
+    addSibling(5, 'deploy pipeline is stuck'); // newer than the checked session
 
     const candidates = await collectCandidates('ag-1', newSession, 'mg-1');
 
     expect(candidates).toEqual([]);
   });
+
+  it('excludes dead-end threads (nudge-only content) but keeps their position occupied', async () => {
+    // Live-hit (2026-09-01): nudges chained into nudges — a thread whose
+    // only content is Marshall's own nudge must never be a target, but it
+    // still happened in the channel, so older threads stay pushed down.
+    const deadEnd = addSibling(10, 'vercel deploy status question');
+    outboundBySession[deadEnd] = [
+      {
+        timestamp: minutesAgo(9),
+        kind: 'chat',
+        content: JSON.stringify({ text: 'This looks like it might belong…', threadNudge: true }),
+      },
+    ];
+    const real = addSibling(20, 'prisma migration is failing');
+
+    const candidates = await collectCandidates('ag-1', NEW_SESSION, 'mg-1');
+
+    expect(candidates.map((c) => [c.sessionId, c.position])).toEqual([[real, 1]]);
+  });
+
+  it('keeps a nudged thread that also has a real agent answer', async () => {
+    const answered = addSibling(10, 'ci status of the release');
+    outboundBySession[answered] = [
+      { timestamp: minutesAgo(9), kind: 'chat', content: JSON.stringify({ text: 'nudge', threadNudge: true }) },
+      { timestamp: minutesAgo(8), kind: 'chat', content: JSON.stringify({ text: 'CI is green.' }) },
+    ];
+
+    const candidates = await collectCandidates('ag-1', NEW_SESSION, 'mg-1');
+
+    expect(candidates.map((c) => c.sessionId)).toEqual([answered]);
+  });
+
+  it('keeps a nudged thread where humans kept talking (real replies beyond the opener)', async () => {
+    const busy = addSibling(10, 'workload points formula');
+    historyBySession[busy] = [
+      { timestamp: minutesAgo(8), kind: 'chat-sdk', content: chat('i think ×1.5 is too much', 'U2') },
+      ...rootHistory(minutesAgo(10), 'workload points formula'),
+    ];
+    outboundBySession[busy] = [
+      { timestamp: minutesAgo(9), kind: 'chat', content: JSON.stringify({ text: 'nudge', threadNudge: true }) },
+    ];
+
+    const candidates = await collectCandidates('ag-1', NEW_SESSION, 'mg-1');
+
+    expect(candidates.map((c) => c.sessionId)).toEqual([busy]);
+  });
+});
+
+describe('findRelatedThread scoring', () => {
+  it('a word essentially unique to one thread clears the threshold at position 0', () => {
+    const candidates = [
+      cand('sess-a', 0, 'the prisma migration is failing on staging'),
+      cand('sess-b', 1, 'client asked about the invoice'),
+    ];
+    const match = findRelatedThread('any update on that prisma issue?', candidates);
+    expect(match?.candidate.sessionId).toBe('sess-a');
+    expect(match?.reason).toBe('keywords');
+    expect(match?.score).toBeGreaterThanOrEqual(1);
+  });
+
+  it('common polite English shared by most openers never triggers — the live "i would like to know" case', () => {
+    // "like" and "know" appear in every candidate opener → df = 4 each →
+    // weight 0.25 each. Total 0.5 < 1.0 even at position 0.
+    const candidates = [
+      cand('sess-a', 0, 'i would like to know all tasks in progress'),
+      cand('sess-b', 1, 'i would like to know the deploy list'),
+      cand('sess-c', 2, 'i would like to know the ci status'),
+      cand('sess-d', 3, 'i would like to know the backlog'),
+    ];
+    const match = findRelatedThread('i would like to know about the CUP-4604 task status', candidates);
+    expect(match).toBeNull();
+  });
+
+  it('an old thread needs a proportionally stronger match — position discounts, never adds', () => {
+    // Unique word (weight 1.0) at position 3: 1.0 × 0.7³ = 0.343 → silence.
+    const candidates = [
+      cand('sess-new1', 0, 'client asked about the invoice'),
+      cand('sess-new2', 1, 'standup notes for today'),
+      cand('sess-new3', 2, 'lunch order coordination'),
+      cand('sess-old', 3, 'the prisma migration is failing'),
+    ];
+    expect(findRelatedThread('any update on prisma?', candidates)).toBeNull();
+
+    // But several rare words together still rescue an old thread:
+    // 3 unique words × 0.7³ = 1.03 ≥ 1.0 → nudge.
+    const strong = findRelatedThread('any update on the prisma migration failing?', candidates);
+    expect(strong?.candidate.sessionId).toBe('sess-old');
+  });
+
+  it('prefers the higher-scoring candidate when several clear the bar', () => {
+    const candidates = [
+      cand('sess-weak', 0, 'deploy checklist for friday'),
+      cand('sess-strong', 1, 'vercel deploy of pp-hub failing with prisma error'),
+    ];
+    // shared with weak: deploy (df=2 → 0.5) → 0.5. shared with strong:
+    // deploy(0.5) + vercel(1) + prisma(1) = 2.5 × 0.7 = 1.75.
+    const match = findRelatedThread('vercel deploy prisma issue again', candidates);
+    expect(match?.candidate.sessionId).toBe('sess-strong');
+  });
+
+  it('a direct @-mention of a candidate opener bypasses the score threshold', () => {
+    const candidates = [
+      cand('sess-a', 4, 'totally unrelated words here', { rootSenderId: 'U200' }),
+    ];
+    const match = findRelatedThread('following up on this <@U200>', candidates);
+    expect(match?.candidate.sessionId).toBe('sess-a');
+    expect(match?.reason).toBe('mention');
+  });
+
+  it('returns null when nothing is related at all', () => {
+    const candidates = [cand('sess-a', 0, 'the prisma migration is failing')];
+    expect(findRelatedThread('good morning everyone, happy friday!', candidates)).toBeNull();
+  });
 });
 
 describe('getThreadOpener', () => {
   it("surfaces the opener's isMention flag (true when the message @-mentioned the bot, false otherwise)", async () => {
-    siblingSessions = [];
     historyBySession['sess-m'] = [
       {
         timestamp: new Date().toISOString(),
@@ -191,42 +316,26 @@ describe('getThreadOpener', () => {
     expect((await getThreadOpener('ag-1', 'sess-m'))?.isMention).toBe(true);
     expect((await getThreadOpener('ag-1', 'sess-plain'))?.isMention).toBe(false);
   });
-});
 
-describe('findRelatedThread', () => {
-  const candidates = [
-    {
-      sessionId: 'sess-a',
-      threadId: 'slack:C1:1.0',
-      rootText: 'the deploy pipeline is stuck on the staging environment',
-      rootSenderId: 'U100',
-      rootTimestamp: '2026-08-24T10:00:00Z',
-    },
-    {
-      sessionId: 'sess-b',
-      threadId: 'slack:C1:2.0',
-      rootText: 'client asked about the invoice for last month',
-      rootSenderId: 'U200',
-      rootTimestamp: '2026-08-24T12:00:00Z',
-    },
-  ];
+  it('skips cross-session-context echo rows seeded before the real opener', async () => {
+    historyBySession['sess-seeded'] = [
+      {
+        timestamp: minutesAgo(4),
+        kind: 'chat-sdk',
+        content: chat('the real opening message', 'U2'),
+      },
+      {
+        timestamp: minutesAgo(6),
+        kind: 'chat',
+        content: JSON.stringify({
+          text: 'echoed context from another thread',
+          senderId: 'U3',
+          echo: { surface: 'x', label: 'y' },
+        }),
+      },
+    ];
 
-  it('matches on a direct mention of a candidate thread opener', () => {
-    const match = findRelatedThread('following up on this <@U200> any update?', candidates);
-    expect(match?.candidate.sessionId).toBe('sess-b');
-    expect(match?.reason).toBe('mention');
-  });
-
-  it('matches on shared significant keywords above the threshold', () => {
-    const match = findRelatedThread('any news on the staging deploy pipeline?', candidates);
-    expect(match?.candidate.sessionId).toBe('sess-a');
-    expect(match?.reason).toBe('keywords');
-    expect(match?.sharedKeywords.sort()).toEqual(['deploy', 'pipeline', 'staging'].sort());
-  });
-
-  it('returns null when nothing clears the relatedness bar', () => {
-    const match = findRelatedThread('good morning everyone, happy friday!', candidates);
-    expect(match).toBeNull();
+    expect((await getThreadOpener('ag-1', 'sess-seeded'))?.text).toBe('the real opening message');
   });
 });
 
