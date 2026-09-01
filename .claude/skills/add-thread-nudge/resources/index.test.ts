@@ -564,7 +564,7 @@ describe('handleEngagedSessionCreated', () => {
     const content = JSON.parse(msg.content) as { text: string; echo?: unknown };
     // Marked as an echo so getThreadOpener never mistakes it for the real opener.
     expect(content.echo).toBeDefined();
-    expect(content.text).toContain('Do NOT send any reply');
+    expect(content.text).toContain('Do NOT answer the original question');
   });
 
   it('does nothing when the channel is not allowlisted', async () => {

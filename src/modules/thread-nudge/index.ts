@@ -91,13 +91,15 @@ function snippet(text: string): string {
   return `${cut}…`;
 }
 
+/** Copy shortened on team feedback (Lincoln, 2026-09-01: "TLDR"): two
+ *  sentences, link, minimal quote, 👎. The pinned channel reminder already
+ *  explains the role, so the nudge itself no longer re-introduces it. */
 async function nudgeText(mg: MessagingGroup, candidate: CandidateThread): Promise<string> {
   const permalink = await slackPermalink(mg, candidate.threadId);
-  const pointer = permalink ? `the thread above (${permalink})` : 'the related thread above';
+  const pointer = permalink ? `this thread: ${permalink}` : 'the related thread above';
   return (
-    `This looks like it might belong in ${pointer} — "${snippet(candidate.rootText)}" — instead of starting fresh here. ` +
-    `Want to continue the conversation there? (Marshall is trying out thread nudges — ` +
-    `react 👎 if this one's off.)`
+    `This may belong in ${pointer} — "${snippet(candidate.rootText)}" ` +
+    `Reply there and delete this one. React 👎 if this suggestion is wrong.`
   );
 }
 
@@ -176,6 +178,32 @@ async function postNudge(
   if (platformMsgId) {
     log.info('Thread nudge delivered directly', { sessionId: session.id, platformMsgId });
   }
+
+  // Tell the agent (now or on any LATER wake in this thread) that the
+  // conversation was redirected. Live-hit (2026-09-01, #general): a
+  // poll-path nudge left no note, a human replied "sorry marshall" in the
+  // nudged thread, the sticky wake engaged the agent with no idea a
+  // redirect had happened, and it answered the original question at length
+  // right under the nudge. trigger:false + echo-marked: pure ambient
+  // context, wakes nothing, invisible to getThreadOpener.
+  await writeSessionMessage(agentGroupId, session.id, {
+    id: `thread-nudge-context:${session.id}`,
+    kind: 'chat',
+    timestamp: new Date().toISOString(),
+    channelType: 'session-echo',
+    content: JSON.stringify({
+      text:
+        `Thread-moderation notice: a public thread-nudge was posted in this thread — this conversation was ` +
+        `redirected to an earlier thread (the nudge carries the link). Do NOT answer the original question ` +
+        `here, including if someone replies in this thread later (an acknowledgment or apology may wake you): ` +
+        `reply with at most one short, friendly line, no substance — the real conversation belongs in the ` +
+        `linked thread. Exception: if the person dismisses the nudge with 👎 and re-asks here, answer normally.`,
+      sender: 'system',
+      senderId: 'system',
+      echo: { surface: 'thread-nudge', label: 'thread-moderation notice' },
+    }),
+    trigger: false,
+  });
 }
 
 /** sessionId -> createdAt (ms). Decided sessions (nudged or no-match) are
@@ -335,25 +363,6 @@ export async function handleEngagedSessionCreated(event: SessionCreatedEvent): P
   // deliberate (operator decision): the nudge IS the reply.
   await postNudge(session.agent_group_id, mg, session, match.candidate);
 
-  // Then tell the agent to stay silent: the nudge already answered.
-  await writeSessionMessage(session.agent_group_id, session.id, {
-    id: `thread-nudge-context:${session.id}`,
-    kind: 'chat',
-    timestamp: new Date().toISOString(),
-    channelType: 'session-echo',
-    content: JSON.stringify({
-      text:
-        `Thread-moderation notice: the message you were just asked appears to continue an earlier thread, and a ` +
-        `public thread-nudge (with the 👎 dismissal option) has ALREADY been posted in this thread as the ` +
-        `complete response. Do NOT send any reply to this question — not an answer, not a redirect, nothing. ` +
-        `The person will either continue in the linked thread (answer them there when they do) or dismiss the ` +
-        `nudge with 👎.`,
-      sender: 'system',
-      senderId: 'system',
-      echo: { surface: 'thread-nudge', label: 'thread-moderation notice' },
-    }),
-    trigger: false,
-  });
   log.info('Thread nudge posted for engaged session (agent silenced)', {
     sessionId: session.id,
     messagingGroupId: mg.id,
