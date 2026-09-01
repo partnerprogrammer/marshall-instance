@@ -63,6 +63,11 @@ export interface RelatedMatch {
   score: number;
 }
 
+/** Cold-start belt only: 1/df makes channel-common words weigh ~nothing
+ *  once they repeat in the pool, but in a small/fresh pool the FIRST
+ *  repetition of polite filler ("i would like to know…") would look rare.
+ *  Content-free conversational English is therefore dropped up front;
+ *  domain nouns stay out of this list on purpose — df handles them. */
 const STOPWORDS = new Set([
   'this',
   'that',
@@ -82,6 +87,33 @@ const STOPWORDS = new Set([
   'please',
   'thanks',
   'hello',
+  'like',
+  'know',
+  'want',
+  'need',
+  'needs',
+  'going',
+  'today',
+  'everyone',
+  'someone',
+  'anyone',
+  'quick',
+  'still',
+  'again',
+  'just',
+  'really',
+  'right',
+  'good',
+  'great',
+  'sure',
+  'maybe',
+  'status',
+  'update',
+  'updates',
+  'latest',
+  'news',
+  'question',
+  'questions',
 ]);
 
 function parseContent(raw: string): {
