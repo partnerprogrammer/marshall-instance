@@ -26,7 +26,7 @@
  */
 import { botTokenKeyForInstance } from '../../channels/slack-lib.js';
 import { getMessagingGroup, getMessagingGroupAgents } from '../../db/messaging-groups.js';
-import { getSessionsByAgentGroup, isTaskThread } from '../../db/sessions.js';
+import { isTaskThread } from '../../db/sessions.js';
 import { getDeliveryAdapter } from '../../delivery.js';
 import { readEnvFile } from '../../env.js';
 import { log } from '../../log.js';
@@ -36,6 +36,7 @@ import { withExistingMailboxSession, writeOutboundDirect, writeSessionMessage } 
 import type { MessagingGroup, Session } from '../../types.js';
 import type { CandidateThread } from './classify.js';
 import { collectCandidates, findRelatedThread, getThreadOpener } from './classify.js';
+import { recentChannelSessions } from './sessions-query.js';
 import {
   NUDGE_CHECK_WINDOW_MINUTES,
   NUDGE_SNIPPET_MAX_CHARS,
@@ -261,8 +262,10 @@ export async function pollThreadNudge(): Promise<void> {
       // checkSession's own thread_id check is the reliable filter.
       const wirings = await getMessagingGroupAgents(messagingGroupId);
       for (const wiring of wirings) {
-        const sessions = (await getSessionsByAgentGroup(wiring.agent_group_id)).filter(
-          (s) => s.status === 'active' && s.messaging_group_id === messagingGroupId,
+        const sessions = await recentChannelSessions(
+          wiring.agent_group_id,
+          messagingGroupId,
+          NUDGE_CHECK_WINDOW_MINUTES * 60_000,
         );
         for (const session of sessions) {
           try {

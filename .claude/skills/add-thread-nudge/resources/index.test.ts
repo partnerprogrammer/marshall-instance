@@ -40,8 +40,16 @@ vi.mock('../../db/messaging-groups.js', () => ({
   getMessagingGroupAgents: async (id: string) => wiringsByMg[id] ?? [],
 }));
 vi.mock('../../db/sessions.js', () => ({
-  getSessionsByAgentGroup: async (agentGroupId: string) => sessionsByAgentGroup[agentGroupId] ?? [],
   isTaskThread: (t: string) => t.startsWith('system:tasks'),
+}));
+vi.mock('./sessions-query.js', () => ({
+  recentChannelSessions: async (agentGroupId: string, mgId: string, windowMs: number) =>
+    (sessionsByAgentGroup[agentGroupId] ?? []).filter(
+      (s) =>
+        s.messaging_group_id === mgId &&
+        s.status === 'active' &&
+        Date.parse(s.created_at as string) >= Date.now() - windowMs,
+    ),
 }));
 const writeSessionMessage = vi.fn();
 const markDelivered = vi.fn();

@@ -32,7 +32,7 @@
  */
 import { botTokenKeyForInstance } from '../../channels/slack-lib.js';
 import { getMessagingGroup, getMessagingGroupAgents } from '../../db/messaging-groups.js';
-import { getSessionsByAgentGroup, isTaskThread } from '../../db/sessions.js';
+import { isTaskThread } from '../../db/sessions.js';
 import { getDeliveryAdapter } from '../../delivery.js';
 import { readEnvFile } from '../../env.js';
 import { log } from '../../log.js';
@@ -40,6 +40,7 @@ import { withExistingMailboxSession, writeOutboundDirect } from '../../session-m
 import type { MessagingGroup, Session } from '../../types.js';
 import { pickApprovalDelivery, pickApprover } from '../approvals/primitive.js';
 import { getThreadOpener } from '../thread-nudge/classify.js';
+import { recentChannelSessions } from '../thread-nudge/sessions-query.js';
 import { THREAD_NUDGE_MESSAGING_GROUPS } from '../thread-nudge/config.js';
 import { slackPermalink } from '../thread-nudge/index.js';
 import { DISMISS_REACTIONS, DISMISSAL_WATCH_WINDOW_MINUTES, FEEDBACK_POLL_INTERVAL_MS } from './config.js';
@@ -223,8 +224,10 @@ export async function pollThreadNudgeFeedback(): Promise<void> {
 
       const wirings = await getMessagingGroupAgents(messagingGroupId);
       for (const wiring of wirings) {
-        const sessions = (await getSessionsByAgentGroup(wiring.agent_group_id)).filter(
-          (s) => s.status === 'active' && s.messaging_group_id === messagingGroupId,
+        const sessions = await recentChannelSessions(
+          wiring.agent_group_id,
+          messagingGroupId,
+          DISMISSAL_WATCH_WINDOW_MINUTES * 60_000,
         );
         for (const session of sessions) {
           try {

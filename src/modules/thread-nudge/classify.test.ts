@@ -25,8 +25,15 @@ let historyBySession: Record<string, HistoryRow[] | undefined> = {};
 let outboundBySession: Record<string, HistoryRow[] | undefined> = {};
 
 vi.mock('../../db/sessions.js', () => ({
-  getSessionsByAgentGroup: () => siblingSessions,
   isTaskThread: (t: string) => t.startsWith('system:tasks'),
+}));
+// Mirrors the SQL predicate of the real helper (mg + active + window).
+vi.mock('./sessions-query.js', () => ({
+  recentChannelSessions: async (_ag: string, mgId: string, windowMs: number) =>
+    siblingSessions.filter(
+      (s) =>
+        s.messaging_group_id === mgId && s.status === 'active' && Date.parse(s.created_at) >= Date.now() - windowMs,
+    ),
 }));
 vi.mock('../../session-manager.js', () => ({
   withExistingMailboxSession: (_g: string, sessionId: string, fn: (mailbox: unknown) => unknown) =>

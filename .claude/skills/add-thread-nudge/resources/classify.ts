@@ -28,8 +28,9 @@
  * with wake=false and so never gets a trigger=1 row. getThreadOpener()
  * below reads inbound history directly instead — see its own doc comment.
  */
-import { getSessionsByAgentGroup, isTaskThread } from '../../db/sessions.js';
+import { isTaskThread } from '../../db/sessions.js';
 import { withExistingMailboxSession } from '../../session-manager.js';
+import { recentChannelSessions } from './sessions-query.js';
 import type { Session } from '../../types.js';
 import {
   CANDIDATE_LIMIT,
@@ -253,12 +254,10 @@ export async function collectCandidates(
 
   // thread_id === null means a non-threaded/shared-mode session — there's
   // no navigable thread to point a nudge at, so it can't be a candidate.
-  const siblings = (await getSessionsByAgentGroup(agentGroupId))
+  const siblings = (await recentChannelSessions(agentGroupId, messagingGroupId, CANDIDATE_MAX_AGE_MINUTES * 60_000))
     .filter(
       (s) =>
         s.id !== session.id &&
-        s.status === 'active' &&
-        s.messaging_group_id === messagingGroupId &&
         s.thread_id !== null &&
         !isTaskThread(s.thread_id) &&
         !Number.isNaN(Date.parse(s.created_at)) &&

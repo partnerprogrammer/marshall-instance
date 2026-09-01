@@ -89,11 +89,12 @@ whoever's in the thread.
 
 ### 1. Copy the module and its tests
 
-Copy all five resource files into `src/modules/thread-nudge/`. The tests
+Copy all six resource files into `src/modules/thread-nudge/`. The tests
 ship with the skill and run against the composed project.
 
 ```
 .claude/skills/add-thread-nudge/resources/config.ts         → src/modules/thread-nudge/config.ts
+.claude/skills/add-thread-nudge/resources/sessions-query.ts  → src/modules/thread-nudge/sessions-query.ts
 .claude/skills/add-thread-nudge/resources/classify.ts        → src/modules/thread-nudge/classify.ts
 .claude/skills/add-thread-nudge/resources/classify.test.ts   → src/modules/thread-nudge/classify.test.ts
 .claude/skills/add-thread-nudge/resources/index.ts           → src/modules/thread-nudge/index.ts
