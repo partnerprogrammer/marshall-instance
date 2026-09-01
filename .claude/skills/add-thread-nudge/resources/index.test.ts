@@ -44,13 +44,20 @@ vi.mock('../../db/sessions.js', () => ({
   isTaskThread: (t: string) => t.startsWith('system:tasks'),
 }));
 const writeSessionMessage = vi.fn();
+const markDelivered = vi.fn();
+const adapterDeliver = vi.fn();
 const registeredHooks: Array<(event: unknown) => unknown> = [];
+
+vi.mock('../../delivery.js', () => ({
+  getDeliveryAdapter: () => ({ deliver: adapterDeliver }),
+}));
 
 vi.mock('../../session-manager.js', () => ({
   withExistingMailboxSession: async (_g: string, sessionId: string, action: (m: unknown) => unknown) =>
     action({
       getInboundHistory: () => historyBySession[sessionId] ?? [],
       getOutboundHistory: () => outboundHistoryBySession[sessionId] ?? [],
+      markDelivered,
     }),
   writeOutboundDirect,
   writeSessionMessage,
@@ -126,6 +133,9 @@ beforeEach(() => {
   findRelatedThread.mockReset();
   writeOutboundDirect.mockReset();
   writeSessionMessage.mockReset();
+  markDelivered.mockReset();
+  adapterDeliver.mockReset();
+  adapterDeliver.mockResolvedValue('1700000000.000100');
   fetchMock.mockReset();
   fetchMock.mockResolvedValue({
     json: async () => ({ ok: true, permalink: 'https://pp.slack.com/archives/C1/p1710000000000000' }),
@@ -311,6 +321,52 @@ describe('checkSession', () => {
     const content = JSON.parse(writeOutboundDirect.mock.calls[0]![2].content) as { text: string };
     expect(content.text).not.toContain('slack:C1:1.0');
     expect(content.text).toContain('the related thread above');
+  });
+
+  it('delivers the nudge directly through the adapter and marks it delivered BEFORE persisting the row', async () => {
+    // The marker-first order is what makes the direct path race-free: the
+    // outbound row is born already-delivered, so the host delivery poll
+    // can never pick it up in between and double-post.
+    const order: string[] = [];
+    adapterDeliver.mockImplementation(async () => {
+      order.push('deliver');
+      return '1700000000.000100';
+    });
+    markDelivered.mockImplementation(() => order.push('markDelivered'));
+    writeOutboundDirect.mockImplementation(async () => order.push('writeOutbound'));
+
+    const session = freshSession();
+    setOpener(session.id, 'following up on the deploy');
+    collectCandidates.mockResolvedValue([{ sessionId: 'sess-a', threadId: 'slack:C1:1.0' }]);
+    findRelatedThread.mockReturnValue({
+      candidate: { sessionId: 'sess-a', threadId: 'slack:C1:1.0', rootText: 'the deploy pipeline is stuck' },
+      sharedKeywords: ['deploy'],
+      reason: 'keywords',
+      score: 1.5,
+    });
+
+    await checkSession('ag-1', MG, session as never);
+
+    expect(order).toEqual(['deliver', 'markDelivered', 'writeOutbound']);
+    expect(markDelivered).toHaveBeenCalledWith(`thread-nudge:${session.id}`, '1700000000.000100');
+  });
+
+  it('falls back to the plain outbox path when direct delivery fails — nudge still posts', async () => {
+    adapterDeliver.mockRejectedValue(new Error('slack down'));
+    const session = freshSession();
+    setOpener(session.id, 'following up on the deploy');
+    collectCandidates.mockResolvedValue([{ sessionId: 'sess-a', threadId: 'slack:C1:1.0' }]);
+    findRelatedThread.mockReturnValue({
+      candidate: { sessionId: 'sess-a', threadId: 'slack:C1:1.0', rootText: 'the deploy pipeline is stuck' },
+      sharedKeywords: ['deploy'],
+      reason: 'keywords',
+      score: 1.5,
+    });
+
+    await checkSession('ag-1', MG, session as never);
+
+    expect(writeOutboundDirect).toHaveBeenCalledTimes(1);
+    expect(markDelivered).not.toHaveBeenCalled();
   });
 
   it('memoizes a no-match decision — a later call for the same session does no further work', async () => {

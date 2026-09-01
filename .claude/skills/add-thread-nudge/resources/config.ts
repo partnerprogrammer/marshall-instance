@@ -48,9 +48,11 @@ export const THREAD_NUDGE_MESSAGING_GROUPS = new Set(
  *  No container wake involved (pure host-side SQLite reads) and each
  *  session is only ever really checked once (see the module doc comment in
  *  index.ts), so this can run faster than a cron-scheduled agent task ever
- *  could without multiplying work — 45s is a UX choice (how soon a stray
- *  reply gets caught), not a cost tradeoff. */
-export const POLL_INTERVAL_MS = 45_000;
+ *  could without multiplying work — the interval is a UX choice (how soon
+ *  a stray reply gets caught), not a cost tradeoff. 45s→20s on live
+ *  feedback (2026-09-01): the nudge loses its corrective effect when it
+ *  lands after the conversation already moved on. */
+export const POLL_INTERVAL_MS = 20_000;
 
 /** A session older than this is no longer worth nudging — "you should have
  *  replied in the thread" stops being useful advice once the moment has

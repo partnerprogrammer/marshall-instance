@@ -27,6 +27,7 @@
 import { botTokenKeyForInstance } from '../../channels/slack-lib.js';
 import { getMessagingGroup, getMessagingGroupAgents } from '../../db/messaging-groups.js';
 import { getSessionsByAgentGroup, isTaskThread } from '../../db/sessions.js';
+import { getDeliveryAdapter } from '../../delivery.js';
 import { readEnvFile } from '../../env.js';
 import { log } from '../../log.js';
 import type { SessionCreatedEvent } from '../../router.js';
@@ -117,6 +118,65 @@ async function alreadyNudged(agentGroupId: string, sessionId: string): Promise<b
   });
 }
 
+/**
+ * Post the nudge into the session's thread with minimal latency.
+ *
+ * Delivers directly through the channel adapter FIRST (the nudge's whole
+ * value is timeliness — waiting for the outbox delivery poll added up to
+ * ~60s on live measurement, 2026-09-01), then persists the outbound row
+ * already marked delivered: markDelivered is written BEFORE the row, so
+ * the host delivery poll can never race in between and double-post
+ * (getDueMessages excludes delivered ids). The persisted row + marker keep
+ * everything downstream working unchanged — alreadyNudged dedup, the
+ * feedback module's deliveredNudgeTs lookup, restart safety. If the direct
+ * delivery fails, falls back to the plain outbox path (slower, delivered
+ * by the host poll as before).
+ */
+async function postNudge(
+  agentGroupId: string,
+  mg: MessagingGroup,
+  session: Session,
+  candidate: CandidateThread,
+): Promise<void> {
+  const id = `thread-nudge:${session.id}`;
+  const content = JSON.stringify({ text: await nudgeText(mg, candidate), threadNudge: true });
+
+  let platformMsgId: string | undefined;
+  const adapter = getDeliveryAdapter();
+  if (adapter) {
+    try {
+      platformMsgId = await adapter.deliver(
+        mg.channel_type,
+        mg.platform_id,
+        session.thread_id,
+        'chat',
+        content,
+        undefined,
+        mg.instance ?? undefined,
+      );
+    } catch (err) {
+      log.warn('Thread nudge direct delivery failed — falling back to outbox', { sessionId: session.id, err });
+    }
+  }
+
+  if (platformMsgId) {
+    await withExistingMailboxSession(agentGroupId, session.id, (mailbox) => {
+      mailbox.markDelivered(id, platformMsgId);
+    });
+  }
+  await writeOutboundDirect(agentGroupId, session.id, {
+    id,
+    kind: 'chat',
+    platformId: mg.platform_id,
+    channelType: mg.channel_type,
+    threadId: session.thread_id,
+    content,
+  });
+  if (platformMsgId) {
+    log.info('Thread nudge delivered directly', { sessionId: session.id, platformMsgId });
+  }
+}
+
 /** sessionId -> createdAt (ms). Decided sessions (nudged or no-match) are
  *  never re-evaluated — see the module doc comment for why that's safe.
  *  createdAt is kept alongside so decided() can prune entries once a
@@ -173,14 +233,7 @@ export async function checkSession(agentGroupId: string, mg: MessagingGroup, ses
     return;
   }
 
-  await writeOutboundDirect(agentGroupId, session.id, {
-    id: `thread-nudge:${session.id}`,
-    kind: 'chat',
-    platformId: mg.platform_id,
-    channelType: mg.channel_type,
-    threadId: session.thread_id,
-    content: JSON.stringify({ text: await nudgeText(mg, match.candidate), threadNudge: true }),
-  });
+  await postNudge(agentGroupId, mg, session, match.candidate);
   decided.set(session.id, createdAt);
   log.info('Thread nudge posted', {
     sessionId: session.id,
@@ -277,14 +330,7 @@ export async function handleEngagedSessionCreated(event: SessionCreatedEvent): P
   // threadNudge marker, so the feedback module (CUP-4870) watches this
   // nudge exactly like a poll-path one. Uniform UX across both paths is
   // deliberate (operator decision): the nudge IS the reply.
-  await writeOutboundDirect(session.agent_group_id, session.id, {
-    id: `thread-nudge:${session.id}`,
-    kind: 'chat',
-    platformId: mg.platform_id,
-    channelType: mg.channel_type,
-    threadId: session.thread_id,
-    content: JSON.stringify({ text: await nudgeText(mg, match.candidate), threadNudge: true }),
-  });
+  await postNudge(session.agent_group_id, mg, session, match.candidate);
 
   // Then tell the agent to stay silent: the nudge already answered.
   await writeSessionMessage(session.agent_group_id, session.id, {
