@@ -70,7 +70,7 @@ export const CANDIDATE_LIMIT = 8;
 /** Sanity/cost ceiling only — position (CANDIDATE_LIMIT + POSITION_DECAY)
  *  is the real cutoff. This just keeps a hibernating channel from pointing
  *  at archaeological threads, and bounds the DB scan. */
-export const CANDIDATE_MAX_AGE_MINUTES = 7 * 24 * 60;
+export const CANDIDATE_MAX_AGE_MINUTES = 3 * 24 * 60;
 
 /** Per-position score multiplier: the newest candidate thread is ×1, the
  *  one before it ×0.7, five threads back ×0.17. Multiplied (never added) so

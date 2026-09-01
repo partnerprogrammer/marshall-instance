@@ -136,8 +136,8 @@ describe('collectCandidates', () => {
     expect(candidates.map((c) => [c.sessionId, c.position])).toEqual([[id, 0]]);
   });
 
-  it('excludes threads older than the 7-day sanity ceiling', async () => {
-    addSibling(8 * 24 * 60, 'archaeological thread');
+  it('excludes threads older than the 3-day sanity ceiling', async () => {
+    addSibling(4 * 24 * 60, 'archaeological thread');
     const candidates = await collectCandidates('ag-1', NEW_SESSION, 'mg-1');
     expect(candidates).toEqual([]);
   });
