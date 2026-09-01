@@ -17,6 +17,9 @@ importers:
       '@clack/prompts':
         specifier: ^1.2.0
         version: 1.7.0
+      '@nanoco/nanoclaw-dashboard':
+        specifier: ^0.3.0
+        version: 0.3.0
       '@onecli-sh/sdk':
         specifier: 2.2.1
         version: 2.2.1
@@ -307,6 +310,10 @@ packages:
 
   '@jridgewell/sourcemap-codec@1.5.5':
     resolution: {integrity: sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og==}
+
+  '@nanoco/nanoclaw-dashboard@0.3.0':
+    resolution: {integrity: sha512-AT1sLe/PxtSMytMqXOH5xeoFw9gyYpEhXC4XIA4/940Fmw45FWAJfdQzyVRi9JZKhb2b6Qr6nqVfQRgAB3LoaA==}
+    hasBin: true
 
   '@onecli-sh/sdk@2.2.1':
     resolution: {integrity: sha512-q2mCW4ZsARlLEoTxz/P0NQ4MiCh7Z2n28pxkSc7srS+tozyw40PdTnWYW7NI8hfSYplZTx5856Adq1iPi4KN3Q==}
@@ -1735,6 +1742,8 @@ snapshots:
   '@humanwhocodes/retry@0.4.3': {}
 
   '@jridgewell/sourcemap-codec@1.5.5': {}
+
+  '@nanoco/nanoclaw-dashboard@0.3.0': {}
 
   '@onecli-sh/sdk@2.2.1': {}
 
