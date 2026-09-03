@@ -12,10 +12,19 @@
 # Must be invoked by its full path (or GH_BIN pointed at it) — this file is
 # itself named "gh" so REAL_GH below is an explicit path, never a PATH
 # lookup, or this would recurse into itself.
+#
+# SSL_CERT_FILE: gh is a separate Go binary from git — it doesn't read git's
+# http.sslCAInfo config (that's git-only), and Go's TLS stack needs its own
+# trust anchor via SSL_CERT_FILE/SSL_CERT_DIR. Without this, every gh call
+# through the OneCLI MITM proxy fails TLS verification and finalize_handoff
+# can never confirm a PR exists — even after a real, successful push (droplet
+# live-test, CUP-5000, 2026-09-03). The CA path is the same one git already
+# trusts (see gitConfigEntries() in server.ts).
 set -euo pipefail
 
 REAL_GH="${MARSHALL_REAL_GH_BIN:-/workspace/extra/gh/bin/gh}"
 HUB_BASE_URL="${MARSHALL_HUB_BASE_URL:-https://hub.partnerprogrammer.com}"
+export SSL_CERT_FILE="${SSL_CERT_FILE:-/tmp/onecli-gateway-ca.pem}"
 
 response=$(curl -sf -X POST "${HUB_BASE_URL%/}/api/marshall/github-token") || {
   echo "gh shim: failed to reach pp-hub's token-mint endpoint" >&2
