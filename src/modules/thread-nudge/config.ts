@@ -75,16 +75,23 @@ export const CANDIDATE_LIMIT = 8;
 export const CANDIDATE_MAX_AGE_MINUTES = 3 * 24 * 60;
 
 /** Per-position score multiplier: the newest candidate thread is ×1, the
- *  one before it ×0.7, five threads back ×0.17. Multiplied (never added) so
+ *  one before it ×0.8, five threads back ×0.33. Multiplied (never added) so
  *  recency alone can never trigger a nudge — shared words are the only
- *  source of points; position only discounts them. */
-export const POSITION_DECAY = 0.7;
+ *  source of points; position only discounts them. 0.7→0.8 after three live
+ *  test batteries (2026-09-03) showed legit continuations landing at exactly
+ *  0.98: two rare shared words two positions back (2 × 0.7² = 0.98) — the
+ *  hot-topic case where a nudge matters most, one position "wasted" by a
+ *  dead-end nudge thread in between. */
+export const POSITION_DECAY = 0.8;
 
 /** Minimum relevance score to post a nudge. Word weights are 1/df within
- *  the candidate pool, so 1.0 means "at least one word essentially unique
+ *  the candidate pool, so ~1 means "at least one word essentially unique
  *  to that thread, or several moderately rare ones" — common-English verbs
- *  ("like", "know") shared across many openers sum to far less than this. */
-export const NUDGE_SCORE_THRESHOLD = 1.0;
+ *  ("like", "know") shared across many openers sum to far less than this.
+ *  1.0→0.9 together with the decay change (same live evidence): the
+ *  worst-case new false positive (one df=1 word at position 1 = 0.8) still
+ *  stays below the bar, while the repeated-0.98 legit misses clear it. */
+export const NUDGE_SCORE_THRESHOLD = 0.9;
 
 /** How many recent inbound rows (newest-first) to scan when looking for a
  *  session's real opening message (classify.ts's getThreadOpener). A brand
