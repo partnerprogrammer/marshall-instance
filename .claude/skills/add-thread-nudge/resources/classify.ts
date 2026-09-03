@@ -115,6 +115,22 @@ const STOPWORDS = new Set([
   'news',
   'question',
   'questions',
+  // Live-hit, real Breez traffic (2026-09-04): generic function
+  // words/pronouns and meta-discourse ("will put this in reply thread")
+  // that scored as if they were topical content in a small/early pool —
+  // same cold-start problem, just words the first pass hadn't hit yet.
+  'them',
+  'were',
+  'into',
+  'here',
+  'thread',
+  'reply',
+  'will',
+  'look',
+  'review',
+  'morning',
+  'afternoon',
+  'evening',
 ]);
 
 function parseContent(raw: string): {
@@ -176,9 +192,17 @@ export async function getThreadOpener(agentGroupId: string, sessionId: string): 
   return undefined;
 }
 
-/** Lowercased, punctuation-stripped, stopword- and short-token-filtered keyword set. */
+/** Lowercased, punctuation-stripped, stopword- and short-token-filtered keyword set.
+ *  Mention markup is stripped first — `mentionedUserIds` already handles mentions on
+ *  their own path; leaving `<@U123>` in would otherwise survive punctuation-stripping
+ *  as the bare token "u123" and count as a "shared keyword" between any two messages
+ *  that mention the same person, trivially satisfying the mention-bypass's relevance
+ *  floor in `findRelatedThread` even with zero real topical overlap (live-hit, real
+ *  Breez traffic 2026-09-03: a channel's frequently-addressed contact gets @-mentioned
+ *  in nearly every message). */
 export function significantKeywords(text: string): Set<string> {
   const tokens = text
+    .replace(/<@[A-Z0-9]+>/g, ' ')
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ')
     .split(/\s+/)
@@ -318,11 +342,21 @@ export function findRelatedThread(messageText: string, candidates: CandidateThre
     const wordScore = shared.reduce((sum, w) => sum + 1 / (df.get(w) ?? 1), 0);
     const score = wordScore * POSITION_DECAY ** candidate.position;
 
-    if (mentions.has(candidate.rootSenderId)) {
-      return { candidate, sharedKeywords: shared, reason: 'mention', score };
-    }
-    if (score >= NUDGE_SCORE_THRESHOLD && (!best || score > best.score)) {
-      best = { candidate, sharedKeywords: shared, reason: 'keywords', score };
+    // A direct @-mention of the candidate's opener bypasses the score
+    // THRESHOLD, but never the relevance floor (shared.length > 0): a
+    // channel's frequently-addressed contact (the person everyone escalates
+    // to) gets @-mentioned in nearly every message, so a bare mention with
+    // zero shared keywords carries no information about which of their
+    // threads is meant. Live-hit on real Breez traffic (2026-09-03): bare
+    // mentions of the channel's go-to contact "matched" unrelated threads at
+    // score=0.000, and — because this used to return on the first mention
+    // hit by position order — sometimes pre-empted a later candidate that
+    // actually scored well on real keyword overlap. Now every candidate is
+    // scored and the single best-scoring eligible one wins, mention or not.
+    const isMentionMatch = mentions.has(candidate.rootSenderId) && shared.length > 0;
+    const eligible = isMentionMatch || score >= NUDGE_SCORE_THRESHOLD;
+    if (eligible && (!best || score > best.score)) {
+      best = { candidate, sharedKeywords: shared, reason: isMentionMatch ? 'mention' : 'keywords', score };
     }
   }
 

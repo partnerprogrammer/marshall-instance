@@ -294,13 +294,35 @@ describe('findRelatedThread scoring', () => {
     expect(match?.candidate.sessionId).toBe('sess-strong');
   });
 
-  it('a direct @-mention of a candidate opener bypasses the score threshold', () => {
-    const candidates = [
-      cand('sess-a', 4, 'totally unrelated words here', { rootSenderId: 'U200' }),
-    ];
-    const match = findRelatedThread('following up on this <@U200>', candidates);
+  it('a direct @-mention of a candidate opener bypasses the score threshold when they also share a keyword', () => {
+    // shared "deploy" alone (df=1 → weight 1) × 0.7^4 = 0.24, well under
+    // NUDGE_SCORE_THRESHOLD (1.0) on keywords alone — the mention is what
+    // clears the bar, not the word score.
+    const candidates = [cand('sess-a', 4, 'deploy checklist for friday', { rootSenderId: 'U200' })];
+    const match = findRelatedThread('following up on the deploy <@U200>', candidates);
     expect(match?.candidate.sessionId).toBe('sess-a');
     expect(match?.reason).toBe('mention');
+  });
+
+  it('a bare @-mention with zero shared keywords does not match — mentioning the channel\'s go-to contact is not itself a signal', () => {
+    // Live-hit on real Breez traffic (2026-09-03): every message @-mentions
+    // the same escalation contact, so a mention alone would otherwise match
+    // ANY of their recent threads regardless of content.
+    const candidates = [cand('sess-a', 0, 'totally unrelated words here', { rootSenderId: 'U200' })];
+    expect(findRelatedThread('following up on this <@U200>', candidates)).toBeNull();
+  });
+
+  it('a low-relevance mention at an early position does not pre-empt a better keyword match at a later position', () => {
+    // Live-hit regression: the old first-match-by-position `return` meant a
+    // bare/weak mention hit at position 0 could win before the scan ever
+    // reached a genuinely well-scored candidate further back.
+    const candidates = [
+      cand('sess-mention', 0, 'thanks for the help everyone', { rootSenderId: 'U200' }),
+      cand('sess-real', 1, 'the prisma migration is failing on staging'),
+    ];
+    const match = findRelatedThread('any update on that prisma migration issue? <@U200>', candidates);
+    expect(match?.candidate.sessionId).toBe('sess-real');
+    expect(match?.reason).toBe('keywords');
   });
 
   it('returns null when nothing is related at all', () => {
