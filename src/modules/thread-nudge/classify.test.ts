@@ -372,11 +372,25 @@ describe('significantKeywords', () => {
     // "hello"/"what"/"about" are stopwords, "the" is below MIN_KEYWORD_LENGTH.
     expect(significantKeywords('Hello! What about the Deploy-Pipeline?')).toEqual(new Set(['deploy', 'pipeline']));
   });
+
+  it('strips both mention shapes so a mentioned id never becomes a keyword', () => {
+    // Live-hit (marshall-test, 2026-09-03 23:17): the bare "@U..." form is
+    // what stored text actually contains; left in, "u0b9t03qx9p" scored 1.0
+    // between two unrelated messages that both mentioned the bot.
+    expect(significantKeywords('<@U123ABCD> and @U0B9T03QX9P check the deploy')).toEqual(new Set(['check', 'deploy']));
+  });
 });
 
 describe('mentionedUserIds', () => {
   it('extracts slack-style mention ids', () => {
     expect(mentionedUserIds('hey <@U123> and <@U456>, see above')).toEqual(new Set(['U123', 'U456']));
+  });
+
+  it('extracts chat-sdk normalized bare mentions — the shape stored message text actually has', () => {
+    // Live-hit (marshall-test, 2026-09-03): messages_in text stores
+    // "@U0B9T03QX9P ..." with no angle brackets; the raw-only pattern
+    // returned an empty set for every production message.
+    expect(mentionedUserIds('@U0B9T03QX9P do you have access to Vercel?')).toEqual(new Set(['U0B9T03QX9P']));
   });
 
   it('returns an empty set when there are no mentions', () => {

@@ -192,17 +192,28 @@ export async function getThreadOpener(agentGroupId: string, sessionId: string): 
   return undefined;
 }
 
+/** Both mention shapes seen in this codebase's message texts: Slack raw markup
+ *  (`<@U123>`) AND the chat-sdk's normalized form (`@U0B9T03QX9P`, no angle
+ *  brackets) — the latter is what actually lands in stored `messages_in` text.
+ *  The first deployed fix only stripped the raw form, so in production the bare
+ *  `@U...` id survived tokenization as the keyword "u0b9t03qx9p" shared by any
+ *  two messages mentioning the same person — live-hit (marshall-test,
+ *  2026-09-03 23:17): a "@Marshall prisma?" follow-up scored 1.0 against the
+ *  immediately-preceding "@Marshall vercel?" thread on that token alone and
+ *  nudged to the wrong thread with the agent silenced. */
+const MENTION_MARKUP = /<@[A-Z0-9]+>|@[UW][A-Z0-9]{4,}/g;
+
 /** Lowercased, punctuation-stripped, stopword- and short-token-filtered keyword set.
  *  Mention markup is stripped first — `mentionedUserIds` already handles mentions on
- *  their own path; leaving `<@U123>` in would otherwise survive punctuation-stripping
- *  as the bare token "u123" and count as a "shared keyword" between any two messages
+ *  their own path; leaving a mention in would otherwise survive punctuation-stripping
+ *  as a bare id token and count as a "shared keyword" between any two messages
  *  that mention the same person, trivially satisfying the mention-bypass's relevance
  *  floor in `findRelatedThread` even with zero real topical overlap (live-hit, real
  *  Breez traffic 2026-09-03: a channel's frequently-addressed contact gets @-mentioned
  *  in nearly every message). */
 export function significantKeywords(text: string): Set<string> {
   const tokens = text
-    .replace(/<@[A-Z0-9]+>/g, ' ')
+    .replace(MENTION_MARKUP, ' ')
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ')
     .split(/\s+/)
@@ -210,11 +221,15 @@ export function significantKeywords(text: string): Set<string> {
   return new Set(tokens);
 }
 
-/** Slack-style <@U123> mention ids referenced in a message. */
+/** Mention ids referenced in a message — matches both Slack raw markup
+ *  (`<@U123>`) and the chat-sdk's normalized bare form (`@U123`), because the
+ *  raw form never appears in stored message text (see MENTION_MARKUP): with
+ *  only the raw pattern this returned an empty set in production and the
+ *  mention-bypass path in findRelatedThread never fired outside tests. */
 export function mentionedUserIds(text: string): Set<string> {
   const ids = new Set<string>();
-  for (const m of text.matchAll(/<@([A-Z0-9]+)>/g)) {
-    ids.add(m[1]!);
+  for (const m of text.matchAll(/<@([A-Z0-9]+)>|@([UW][A-Z0-9]{4,})/g)) {
+    ids.add((m[1] ?? m[2])!);
   }
   return ids;
 }
