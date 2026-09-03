@@ -98,9 +98,3 @@ export const ROOT_LOOKUP_HISTORY_LIMIT = 60;
 
 /** Tokens shorter than this are never "significant" (too common/low-signal). */
 export const MIN_KEYWORD_LENGTH = 4;
-
-/** How much of the matched thread's opening message to quote in the nudge
- *  text, so a reader can tell at a glance whether the pointer is worth
- *  following without leaving the channel. Shortened from 120 to 80 on
- *  live feedback (CUP-4868) — the longer quote read as too much text. */
-export const NUDGE_SNIPPET_MAX_CHARS = 80;
