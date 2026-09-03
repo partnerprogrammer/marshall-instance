@@ -96,7 +96,6 @@ vi.mock('./config.js', () => ({
   NUDGE_SCORE_THRESHOLD: 1.0,
   ROOT_LOOKUP_HISTORY_LIMIT: 60,
   MIN_KEYWORD_LENGTH: 4,
-  NUDGE_SNIPPET_MAX_CHARS: 80,
 }));
 
 const { checkSession, pollThreadNudge, handleEngagedSessionCreated } = await import('./index.js');
@@ -279,14 +278,15 @@ describe('checkSession', () => {
     expect(content.threadNudge).toBe(true);
     // Never the raw internal thread_id — a live-hit this regression test guards against.
     expect(content.text).not.toContain('slack:C1:1.0');
-    expect(content.text).toContain('https://pp.slack.com/archives/C1/p1710000000000000');
-    // The quote always ends in "…" — a consistent "this is a snippet" marker,
-    // even here where the quoted text is short enough to need no truncation
-    // (live feedback: it read as an odd, abruptly-complete sentence without it).
-    expect(content.text).toContain('the deploy pipeline is stuck…');
+    // Lincoln's template, verbatim (Slack, 2026-09-01): "this thread" as a
+    // clickable mrkdwn link, exact two-line wording, no quoted snippet.
+    expect(content.text).toBe(
+      'This may belong in <https://pp.slack.com/archives/C1/p1710000000000000|this thread>. ' +
+        'Reply there and delete this one.\n👎 if this suggestion is wrong.',
+    );
   });
 
-  it('still posts a nudge (without a link) when the Slack permalink lookup fails', async () => {
+  it('still posts a nudge (without a link, plain "this thread") when the Slack permalink lookup fails', async () => {
     fetchMock.mockRejectedValue(new Error('boom'));
     const session = freshSession();
     setOpener(session.id, 'following up on the deploy');
@@ -303,8 +303,9 @@ describe('checkSession', () => {
     expect(writeOutboundDirect).toHaveBeenCalledTimes(1);
     const content = JSON.parse(writeOutboundDirect.mock.calls[0]![2].content) as { text: string };
     expect(content.text).not.toContain('slack:C1:1.0');
-    expect(content.text).toContain('the related thread above');
-    expect(content.text).toContain('the deploy pipeline is stuck');
+    expect(content.text).toBe(
+      'This may belong in this thread. Reply there and delete this one.\n👎 if this suggestion is wrong.',
+    );
   });
 
   it('still posts a nudge (without a link) when Slack responds ok:false — the exact live failure this regression test guards against', async () => {
@@ -328,7 +329,7 @@ describe('checkSession', () => {
     expect(writeOutboundDirect).toHaveBeenCalledTimes(1);
     const content = JSON.parse(writeOutboundDirect.mock.calls[0]![2].content) as { text: string };
     expect(content.text).not.toContain('slack:C1:1.0');
-    expect(content.text).toContain('the related thread above');
+    expect(content.text).toContain('this thread');
   });
 
   it('delivers the nudge directly through the adapter and marks it delivered BEFORE persisting the row', async () => {
@@ -552,7 +553,7 @@ describe('handleEngagedSessionCreated', () => {
     const nudgeContent = JSON.parse(nudgeMsg.content) as { text: string; threadNudge: boolean };
     expect(nudgeContent.threadNudge).toBe(true);
     expect(nudgeContent.text).toContain('https://pp.slack.com/archives/C1/p1710000000000000');
-    expect(nudgeContent.text).toContain('the deploy pipeline is stuck');
+    expect(nudgeContent.text).toContain('this thread');
     expect(nudgeContent.text).toContain('👎');
 
     // Plus the silence note so the agent sends nothing on top of the nudge.

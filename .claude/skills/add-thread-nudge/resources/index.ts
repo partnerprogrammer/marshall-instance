@@ -37,12 +37,7 @@ import type { MessagingGroup, Session } from '../../types.js';
 import type { CandidateThread } from './classify.js';
 import { collectCandidates, findRelatedThread, getThreadOpener } from './classify.js';
 import { recentChannelSessions } from './sessions-query.js';
-import {
-  NUDGE_CHECK_WINDOW_MINUTES,
-  NUDGE_SNIPPET_MAX_CHARS,
-  POLL_INTERVAL_MS,
-  THREAD_NUDGE_MESSAGING_GROUPS,
-} from './config.js';
+import { NUDGE_CHECK_WINDOW_MINUTES, POLL_INTERVAL_MS, THREAD_NUDGE_MESSAGING_GROUPS } from './config.js';
 
 /**
  * A real, clickable Slack permalink for a `slack:<channelId>:<ts>` thread
@@ -83,24 +78,23 @@ export async function slackPermalink(mg: MessagingGroup, threadId: string | null
   }
 }
 
-/** Always ends in "…" — a consistent visual marker that this is a quoted
- *  snippet of the other thread, not the whole message, whether or not this
- *  particular one happened to need truncating (live feedback, CUP-4868). */
-function snippet(text: string): string {
-  const cut = text.length > NUDGE_SNIPPET_MAX_CHARS ? text.slice(0, NUDGE_SNIPPET_MAX_CHARS - 1) : text;
-  return `${cut}…`;
-}
-
-/** Copy shortened on team feedback (Lincoln, 2026-09-01: "TLDR"): two
- *  sentences, link, minimal quote, 👎. The pinned channel reminder already
- *  explains the role, so the nudge itself no longer re-introduces it. */
+/**
+ * Copy follows Lincoln's proposed template verbatim (Slack, 2026-09-01,
+ * "TLDR meu jovem!" — the earlier quoted-snippet version read as too much
+ * text on top of an already-two-sentence nudge). Exact wording, exact
+ * two-line shape:
+ *
+ *   This may belong in this thread. Reply there and delete this one.
+ *   👎 if this suggestion is wrong.
+ *
+ * "this thread" is the clickable link (Slack mrkdwn `<url|text>`) when a
+ * permalink is available; falls back to the same plain words, unlinked,
+ * on any permalink failure — the sentence never changes shape.
+ */
 async function nudgeText(mg: MessagingGroup, candidate: CandidateThread): Promise<string> {
   const permalink = await slackPermalink(mg, candidate.threadId);
-  const pointer = permalink ? `this thread: ${permalink}` : 'the related thread above';
-  return (
-    `This may belong in ${pointer} — "${snippet(candidate.rootText)}" ` +
-    `Reply there and delete this one. React 👎 if this suggestion is wrong.`
-  );
+  const pointer = permalink ? `<${permalink}|this thread>` : 'this thread';
+  return `This may belong in ${pointer}. Reply there and delete this one.\n👎 if this suggestion is wrong.`;
 }
 
 /** Has this session already gotten a thread-nudge? Checked against persisted
