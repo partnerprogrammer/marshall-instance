@@ -35,9 +35,10 @@ function repoRoot(): string {
 
 describe('the Vercel CLI is installed in the agent image', () => {
   const root = repoRoot();
-  const manifest = JSON.parse(
-    fs.readFileSync(path.join(root, 'container', 'cli-tools.json'), 'utf8'),
-  ) as Array<{ name: string; version: string }>;
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, 'container', 'cli-tools.json'), 'utf8')) as Array<{
+    name: string;
+    version: string;
+  }>;
 
   it('appears in the CLI manifest', () => {
     expect(manifest.map((t) => t.name)).toContain('vercel');
@@ -49,8 +50,6 @@ describe('the Vercel CLI is installed in the agent image', () => {
   });
 
   it('ships its container skill, so the agent knows the CLI is there', () => {
-    expect(fs.existsSync(path.join(root, 'container', 'skills', 'vercel-cli', 'SKILL.md'))).toBe(
-      true,
-    );
+    expect(fs.existsSync(path.join(root, 'container', 'skills', 'vercel-cli', 'SKILL.md'))).toBe(true);
   });
 });
