@@ -43,8 +43,7 @@ vi.mock('../../session-manager.js', () => ({
     }),
 }));
 
-const { collectCandidates, findRelatedThread, getThreadOpener, significantKeywords, mentionedUserIds } =
-  await import('./classify.js');
+const { collectCandidates, findRelatedThread, getThreadOpener, significantKeywords } = await import('./classify.js');
 
 function chat(text: string, senderId = 'U1'): string {
   return JSON.stringify({ text, sender: 'someone', senderId });
@@ -293,28 +292,18 @@ describe('findRelatedThread scoring', () => {
     expect(match?.candidate.sessionId).toBe('sess-strong');
   });
 
-  it('a direct @-mention of a candidate opener bypasses the score threshold when they also share a keyword', () => {
-    // shared "deploy" alone (df=1 → weight 1) × 0.7^4 = 0.24, well under
-    // NUDGE_SCORE_THRESHOLD (1.0) on keywords alone — the mention is what
-    // clears the bar, not the word score.
+  it('an @-mention of a candidate opener carries no weight — sub-threshold stays silent (no bypass)', () => {
+    // The former mention-bypass is gone: the full official Breez corpus
+    // (2026-09-03, 37 messages) showed it added zero correct matches — every
+    // genuinely-related mention case also cleared the threshold on keyword
+    // score alone — while producing ALL of the remaining wrong nudges (the
+    // channel's go-to contact is @-mentioned in nearly every message, so
+    // their posts became nudge magnets at scores of 0.17-0.58).
     const candidates = [cand('sess-a', 4, 'deploy checklist for friday', { rootSenderId: 'U200' })];
-    const match = findRelatedThread('following up on the deploy <@U200>', candidates);
-    expect(match?.candidate.sessionId).toBe('sess-a');
-    expect(match?.reason).toBe('mention');
+    expect(findRelatedThread('following up on the deploy <@U200>', candidates)).toBeNull();
   });
 
-  it("a bare @-mention with zero shared keywords does not match — mentioning the channel's go-to contact is not itself a signal", () => {
-    // Live-hit on real Breez traffic (2026-09-03): every message @-mentions
-    // the same escalation contact, so a mention alone would otherwise match
-    // ANY of their recent threads regardless of content.
-    const candidates = [cand('sess-a', 0, 'totally unrelated words here', { rootSenderId: 'U200' })];
-    expect(findRelatedThread('following up on this <@U200>', candidates)).toBeNull();
-  });
-
-  it('a low-relevance mention at an early position does not pre-empt a better keyword match at a later position', () => {
-    // Live-hit regression: the old first-match-by-position `return` meant a
-    // bare/weak mention hit at position 0 could win before the scan ever
-    // reached a genuinely well-scored candidate further back.
+  it('a weak mention at an early position never shadows a real keyword match further back', () => {
     const candidates = [
       cand('sess-mention', 0, 'thanks for the help everyone', { rootSenderId: 'U200' }),
       cand('sess-real', 1, 'the prisma migration is failing on staging'),
@@ -378,22 +367,5 @@ describe('significantKeywords', () => {
     // what stored text actually contains; left in, "u0b9t03qx9p" scored 1.0
     // between two unrelated messages that both mentioned the bot.
     expect(significantKeywords('<@U123ABCD> and @U0B9T03QX9P check the deploy')).toEqual(new Set(['check', 'deploy']));
-  });
-});
-
-describe('mentionedUserIds', () => {
-  it('extracts slack-style mention ids', () => {
-    expect(mentionedUserIds('hey <@U123> and <@U456>, see above')).toEqual(new Set(['U123', 'U456']));
-  });
-
-  it('extracts chat-sdk normalized bare mentions — the shape stored message text actually has', () => {
-    // Live-hit (marshall-test, 2026-09-03): messages_in text stores
-    // "@U0B9T03QX9P ..." with no angle brackets; the raw-only pattern
-    // returned an empty set for every production message.
-    expect(mentionedUserIds('@U0B9T03QX9P do you have access to Vercel?')).toEqual(new Set(['U0B9T03QX9P']));
-  });
-
-  it('returns an empty set when there are no mentions', () => {
-    expect(mentionedUserIds('no mentions here')).toEqual(new Set());
   });
 });

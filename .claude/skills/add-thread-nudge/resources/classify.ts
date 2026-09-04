@@ -57,10 +57,10 @@ export interface CandidateThread {
 export interface RelatedMatch {
   candidate: CandidateThread;
   sharedKeywords: string[];
+  /** Always 'keywords' since the mention-bypass removal (2026-09-03) — kept
+   *  in the type so logs/consumers stay shape-stable. */
   reason: 'mention' | 'keywords';
-  /** Final relevance score (word weights × position decay). For 'mention'
-   *  matches this is informational only — a direct @-mention of the
-   *  candidate's opener bypasses the threshold. */
+  /** Final relevance score (word weights × position decay). */
   score: number;
 }
 
@@ -204,13 +204,11 @@ export async function getThreadOpener(agentGroupId: string, sessionId: string): 
 const MENTION_MARKUP = /<@[A-Z0-9]+>|@[UW][A-Z0-9]{4,}/g;
 
 /** Lowercased, punctuation-stripped, stopword- and short-token-filtered keyword set.
- *  Mention markup is stripped first — `mentionedUserIds` already handles mentions on
- *  their own path; leaving a mention in would otherwise survive punctuation-stripping
- *  as a bare id token and count as a "shared keyword" between any two messages
- *  that mention the same person, trivially satisfying the mention-bypass's relevance
- *  floor in `findRelatedThread` even with zero real topical overlap (live-hit, real
- *  Breez traffic 2026-09-03: a channel's frequently-addressed contact gets @-mentioned
- *  in nearly every message). */
+ *  Mention markup is stripped first — a mention is addressing, not topic; left in,
+ *  it would survive punctuation-stripping as a bare id token and count as a
+ *  "shared keyword" between any two messages that mention the same person
+ *  (live-hit, real Breez traffic 2026-09-03: a channel's frequently-addressed
+ *  contact gets @-mentioned in nearly every message). */
 export function significantKeywords(text: string): Set<string> {
   const tokens = text
     .replace(MENTION_MARKUP, ' ')
@@ -219,19 +217,6 @@ export function significantKeywords(text: string): Set<string> {
     .split(/\s+/)
     .filter((t) => t.length >= MIN_KEYWORD_LENGTH && !STOPWORDS.has(t));
   return new Set(tokens);
-}
-
-/** Mention ids referenced in a message — matches both Slack raw markup
- *  (`<@U123>`) and the chat-sdk's normalized bare form (`@U123`), because the
- *  raw form never appears in stored message text (see MENTION_MARKUP): with
- *  only the raw pattern this returned an empty set in production and the
- *  mention-bypass path in findRelatedThread never fired outside tests. */
-export function mentionedUserIds(text: string): Set<string> {
-  const ids = new Set<string>();
-  for (const m of text.matchAll(/<@([A-Z0-9]+)>|@([UW][A-Z0-9]{4,})/g)) {
-    ids.add((m[1] ?? m[2])!);
-  }
-  return ids;
 }
 
 /**
@@ -326,17 +311,16 @@ export async function collectCandidates(
 
 /**
  * Pick the best-matching candidate for a new message, if any clears the
- * relevance bar. A direct @-mention of a candidate thread's opener is
- * always a match (strong signal, bypasses the score threshold); otherwise:
+ * relevance bar:
  *
  *   score = Σ (1 / df(word)) over shared words × POSITION_DECAY^position
  *
  * where df(word) = how many candidate openers contain that word. See the
  * module doc comment for the rationale; NUDGE_SCORE_THRESHOLD gates the
- * result.
+ * result. Keyword relevance is the ONLY signal — see the inline note on why
+ * the former mention-bypass was removed.
  */
 export function findRelatedThread(messageText: string, candidates: CandidateThread[]): RelatedMatch | null {
-  const mentions = mentionedUserIds(messageText);
   const messageKeywords = significantKeywords(messageText);
 
   // Document frequency over the candidate pool: the channel's own recent
@@ -357,21 +341,16 @@ export function findRelatedThread(messageText: string, candidates: CandidateThre
     const wordScore = shared.reduce((sum, w) => sum + 1 / (df.get(w) ?? 1), 0);
     const score = wordScore * POSITION_DECAY ** candidate.position;
 
-    // A direct @-mention of the candidate's opener bypasses the score
-    // THRESHOLD, but never the relevance floor (shared.length > 0): a
-    // channel's frequently-addressed contact (the person everyone escalates
-    // to) gets @-mentioned in nearly every message, so a bare mention with
-    // zero shared keywords carries no information about which of their
-    // threads is meant. Live-hit on real Breez traffic (2026-09-03): bare
-    // mentions of the channel's go-to contact "matched" unrelated threads at
-    // score=0.000, and — because this used to return on the first mention
-    // hit by position order — sometimes pre-empted a later candidate that
-    // actually scored well on real keyword overlap. Now every candidate is
-    // scored and the single best-scoring eligible one wins, mention or not.
-    const isMentionMatch = mentions.has(candidate.rootSenderId) && shared.length > 0;
-    const eligible = isMentionMatch || score >= NUDGE_SCORE_THRESHOLD;
-    if (eligible && (!best || score > best.score)) {
-      best = { candidate, sharedKeywords: shared, reason: isMentionMatch ? 'mention' : 'keywords', score };
+    // No mention-bypass: @-mentioning the person who opened a candidate
+    // thread used to skip the score threshold, but the full official Breez
+    // corpus (37 messages, 2026-09-03) showed it adds zero correct matches —
+    // every genuinely-related mention case also cleared the threshold on
+    // keyword score alone — while producing ALL of the remaining wrong
+    // nudges (scores 0.17-0.58, e.g. a checkout-error report nudged at the
+    // team lead's release-notes post purely because everyone @-mentions the
+    // team lead in every message). Keyword relevance is the only signal.
+    if (score >= NUDGE_SCORE_THRESHOLD && (!best || score > best.score)) {
+      best = { candidate, sharedKeywords: shared, reason: 'keywords', score };
     }
   }
 
