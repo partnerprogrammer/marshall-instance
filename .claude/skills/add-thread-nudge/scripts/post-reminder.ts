@@ -30,7 +30,7 @@ const MARKER = 'A note on how this channel stays organized';
 const REMINDER_TEXT = [
   `:wave: *${MARKER}*`,
   '',
-  'Marshall (our team assistant) helps keep conversations here easy to follow by acting as a thread-organization moderator.',
+  'Marshall is the channel moderator here — its only job is keeping each conversation in its own thread.',
   '',
   '*The norm:* replies about the same topic stay in the same thread — that keeps context together and makes the channel easier to catch up on.',
   '',
