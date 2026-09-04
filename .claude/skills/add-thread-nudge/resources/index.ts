@@ -35,7 +35,7 @@ import { registerSessionCreatedHook } from '../../router.js';
 import { withExistingMailboxSession, writeOutboundDirect, writeSessionMessage } from '../../session-manager.js';
 import type { MessagingGroup, Session } from '../../types.js';
 import type { CandidateThread } from './classify.js';
-import { collectCandidates, findRelatedThread, getThreadOpener } from './classify.js';
+import { collectCandidates, findRelatedThread, getThreadOpener, isAnnouncement } from './classify.js';
 import { recentChannelSessions } from './sessions-query.js';
 import { NUDGE_CHECK_WINDOW_MINUTES, POLL_INTERVAL_MS, THREAD_NUDGE_MESSAGING_GROUPS } from './config.js';
 
@@ -234,6 +234,14 @@ export async function checkSession(agentGroupId: string, mg: MessagingGroup, ses
   // both a nudge and a full answer seconds apart). The nudge exists for
   // human↔human context loss, not conversations with the bot itself.
   if (opener.isMention) {
+    decided.set(session.id, createdAt);
+    return;
+  }
+
+  // An announcement (release-notes broadcast) opens a topic, it never
+  // continues one — nudging it into an older thread is wrong by
+  // construction. It stays eligible as a nudge TARGET for later messages.
+  if (isAnnouncement(opener.text)) {
     decided.set(session.id, createdAt);
     return;
   }

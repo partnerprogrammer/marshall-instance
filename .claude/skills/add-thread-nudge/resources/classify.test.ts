@@ -43,7 +43,9 @@ vi.mock('../../session-manager.js', () => ({
     }),
 }));
 
-const { collectCandidates, findRelatedThread, getThreadOpener, significantKeywords } = await import('./classify.js');
+const { collectCandidates, findRelatedThread, getThreadOpener, significantKeywords, isAnnouncement } = await import(
+  './classify.js'
+);
 
 function chat(text: string, senderId = 'U1'): string {
   return JSON.stringify({ text, sender: 'someone', senderId });
@@ -356,6 +358,26 @@ describe('getThreadOpener', () => {
   });
 });
 
+describe('isAnnouncement', () => {
+  it('matches release-notes broadcasts (with or without v prefix, multiline)', () => {
+    expect(isAnnouncement('Release 1.0.2\nMy Account V2 my.gobreez.com')).toBe(true);
+    expect(isAnnouncement('Release 0.131.0 Add Work To Routes Already In Progress')).toBe(true);
+    expect(isAnnouncement('release v2.3.0 — bug fixes')).toBe(true);
+  });
+
+  it('matches a release header preceded by a celebration line — real corpus shape', () => {
+    expect(isAnnouncement('The first step to Hubspot! Thank you @U0KAIO00001!\nRelease 1.1.0\nThe Hub Help Desk Is Here')).toBe(
+      true,
+    );
+  });
+
+  it('does not match messages that merely talk about a release inline', () => {
+    expect(isAnnouncement('when is the next release 1.0.2 going out?')).toBe(false);
+    expect(isAnnouncement('the release broke my login')).toBe(false);
+    expect(isAnnouncement('Release the hold on order 1748229')).toBe(false);
+  });
+});
+
 describe('significantKeywords', () => {
   it('lowercases, strips punctuation, and drops short/stopword tokens', () => {
     // "hello"/"what"/"about" are stopwords, "the" is below MIN_KEYWORD_LENGTH.
@@ -369,4 +391,3 @@ describe('significantKeywords', () => {
     expect(significantKeywords('<@U123ABCD> and @U0B9T03QX9P check the deploy')).toEqual(new Set(['check', 'deploy']));
   });
 });
-

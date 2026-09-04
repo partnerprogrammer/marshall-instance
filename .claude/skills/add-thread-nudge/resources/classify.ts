@@ -133,6 +133,26 @@ const STOPWORDS = new Set([
   'evening',
 ]);
 
+/**
+ * A release-notes broadcast ("Release 1.0.2 …") is an ANNOUNCEMENT — it opens
+ * a topic, it never continues one, so nudging it into an older thread is
+ * wrong by construction (live-hit, marshall-nudge-test 2026-09-04: a Release
+ * 0.131.0 post got nudged into the route-schedule question it was answering,
+ * score 1.31 — announcements share vocabulary with the asks they fulfil,
+ * which is exactly why keyword overlap misfires on them). Announcements stay
+ * fully eligible as nudge TARGETS — pointing discussion INTO a release
+ * thread is one of the best-performing cases on the real corpus.
+ */
+export function isAnnouncement(text: string): boolean {
+  // Line-anchored, not message-anchored: real release posts sometimes open
+  // with a celebration line before the "Release X.Y.Z" header (live corpus:
+  // "The first step to Hubspot! Thank you @Kaio!\nRelease 1.1.0\n…").
+  // Messages merely DISCUSSING a release cite the version inline mid-
+  // sentence, which a line anchor doesn't match — those stay nudgeable
+  // (being pointed INTO the release thread is exactly right for them).
+  return /^\s*release\s+v?\d+(\.\d+)+\b/im.test(text);
+}
+
 function parseContent(raw: string): {
   text?: string;
   sender?: string;
